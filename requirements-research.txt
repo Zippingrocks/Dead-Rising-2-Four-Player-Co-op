@@ -1,0 +1,2 @@
+# Optional disassembly tools; unit tests use only Python's standard library.
+capstone==5.0.9

@@ -1,0 +1,48 @@
+name: Offline Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Python regression tests
+        run: python -m unittest discover -s 4-player-coop/tools -p 'test_*.py'
+      - name: Synthetic minidump tests
+        run: node --test 4-player-coop/tools/test_hang_dump.mjs
+      - name: Synthetic content backup and restore tests
+        run: ./4-player-coop/tools/test-content-swap.ps1
+      - name: Locate x86 Visual C++ tools
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual C++ x86 tools not found' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars32.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw "Missing $vcvars" }
+          "VCVARS_PATH=$vcvars" >> $env:GITHUB_ENV
+      - name: Native ABI and ownership fixtures
+        run: ./4-player-coop/tools/test-native-abi.ps1 -VcVarsPath $env:VCVARS_PATH
+      - name: Build x86 runtime (no installation)
+        run: ./tools/case-zero-runtime/build.ps1 -VcVarsPath $env:VCVARS_PATH
+      - name: Build crash monitor
+        run: dotnet build tools/dr2-crash-dump-monitor/DR2CrashDumpMonitor.csproj -c Release
