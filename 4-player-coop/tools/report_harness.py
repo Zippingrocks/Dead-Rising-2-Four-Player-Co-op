@@ -90,6 +90,30 @@ def scan_native_flow(lines):
             'registration_trace': registrations[:96]}
 
 
+def scan_native_teardown(lines):
+    installed = False
+    calls = []
+    pattern = re.compile(
+        r'^(\d\d:\d\d:\d\d\.\d{3}) \[\d+\] native teardown: call=(\d+) '
+        r'operation=(client-shutdown|p2p-shutdown|server-down-request|client-event-16|server-event-16) object=([0-9A-Fa-f]{8}) '
+        r'caller=([0-9A-Fa-f]{8}) thread=(\d+) stackHints=([0-9A-Fa-f,]*)$'
+    )
+    for number, line in enumerate(lines, 1):
+        installed |= 'native teardown: bounded PC client/P2P shutdown tracing installed;' in line
+        match = pattern.fullmatch(line.strip())
+        if not match or len(calls) >= 32:
+            continue
+        timestamp, call, operation, object_address, caller, thread, hints = match.groups()
+        frames = hints.split(',') if hints else []
+        if len(frames) > 12 or any(not re.fullmatch(r'[0-9A-Fa-f]{8}', frame) for frame in frames):
+            continue
+        calls.append({'line': number, 'timestamp': timestamp, 'call': int(call), 'operation': operation,
+                      'object': object_address.upper(), 'caller': caller.upper(), 'thread': int(thread),
+                      'stack_address_hints': [frame.upper() for frame in frames]})
+    return {'installed': installed, 'calls': calls,
+            'limitation': 'Bounded original-call observations; caller addresses and stack hints alone do not establish a disconnect cause or gameplay result.'}
+
+
 def scan_nfs_ownership(lines):
     inbound, addresses, completions = [], [], []
     for number, line in enumerate(lines, 1):
@@ -185,7 +209,8 @@ def scan_log(lines, instance, instances):
         if match:
             game_mode, ranked, expected_game_mode, expected_ranked = map(int, match.groups())
             lobby_candidate_compatible |= game_mode == expected_game_mode and ranked == expected_ranked
-        lobby_join_requested |= 'loopback lobby: Player ' in line and ' joined lobby' in line
+        lobby_join_requested |= bool(re.search(
+            rf'loopback lobby: Player {instance + 1} joined lobby\s*$', line))
         if start is None and "direct capacity: signature mismatch" in line:
             unpack_retries += 1
             continue
@@ -318,6 +343,7 @@ def summarize(run, instances):
             result = scan_log([], instance, instances)
         trace_lines = path.read_text(encoding='utf-8-sig', errors='replace').splitlines() if path.exists() else []
         result['native_flow'] = scan_native_flow(trace_lines)
+        result['native_teardown'] = scan_native_teardown(trace_lines)
         result['nfs_ownership'] = scan_nfs_ownership(trace_lines)
         samples = [row for row in rows if int(row["Instance"]) == instance]
         result["process_survived_samples"] = bool(samples) and all(row["Alive"].lower() == "true" for row in samples)
@@ -419,10 +445,12 @@ def summarize(run, instances):
         outcome.get('Configuration', {}).get('ActorActivationProbe') and
         all(actor_activation_valid(result, instance, instances) for instance, result in enumerate(results))
     )
+    missing_lobby_join_instances = [result['instance'] for result in results[1:]
+                                    if not result['lobby_join_requested']]
     lobby_logic_join_verified = bool(
         outcome and outcome.get('Status') == 'observation-completed' and
         outcome.get('Configuration', {}).get('LobbyProbe') and
-        any(result['lobby_join_requested'] for result in results[1:]) and
+        not missing_lobby_join_instances and
         all(result['process_survived_samples'] and not result['process_exit_before_cleanup'] and
             result['test_status'] != 'failed' for result in results)
     )
@@ -439,6 +467,7 @@ def summarize(run, instances):
                 result['four_player_clothing_at_snapshot'] for result in results),
             "local_save_probe_verified": save_verified,
             "lobby_logic_join_verified": lobby_logic_join_verified,
+            "missing_lobby_join_instances": missing_lobby_join_instances,
             "lobby_frontend_join_verified": lobby_join_verified,
             "four_player_actor_activation_verified": actor_activation_verified,
             "four_player_campaign_verified": False}

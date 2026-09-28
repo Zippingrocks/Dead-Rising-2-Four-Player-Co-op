@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from report_harness import actor_activation_valid, clothing_snapshot_ready, latest_mesh_snapshot, loading_evidence, mesh_snapshot_connected, scan_log, scan_native_flow, scan_nfs_ownership, scan_save_probe, summarize
+from report_harness import actor_activation_valid, clothing_snapshot_ready, latest_mesh_snapshot, loading_evidence, mesh_snapshot_connected, scan_log, scan_native_flow, scan_native_teardown, scan_nfs_ownership, scan_save_probe, summarize
 
 
 def endpoint(peer, state, time="12:01:00.000"):
@@ -11,6 +11,54 @@ def endpoint(peer, state, time="12:01:00.000"):
 
 
 class HarnessEvidenceTests(unittest.TestCase):
+    def test_teardown_absence_is_not_stability_evidence(self):
+        result = scan_native_teardown([])
+        self.assertFalse(result['installed'])
+        self.assertEqual(result['calls'], [])
+        self.assertNotIn('gameplay_verified', result)
+
+    def test_teardown_preserves_caller_thread_and_source_line(self):
+        result = scan_native_teardown([
+            'native teardown: bounded PC client/P2P shutdown tracing installed; original calls preserved',
+            '20:00:00.125 [12] native teardown: call=1 operation=client-shutdown '
+            'object=1234abcd caller=00870001 thread=12 stackHints=00870001,00401234',
+            '20:00:00.126 [12] native teardown: call=2 operation=p2p-shutdown '
+            'object=1234ab00 caller=00870002 thread=12 stackHints=',
+        ])
+        self.assertTrue(result['installed'])
+        self.assertEqual(result['calls'][0], {
+            'line': 2, 'timestamp': '20:00:00.125', 'call': 1, 'operation': 'client-shutdown',
+            'object': '1234ABCD', 'caller': '00870001', 'thread': 12,
+            'stack_address_hints': ['00870001', '00401234']})
+        self.assertEqual(result['calls'][1]['stack_address_hints'], [])
+
+    def test_teardown_is_bounded_and_rejects_malformed_hints(self):
+        row = ('20:00:00.125 [12] native teardown: call=1 operation=client-shutdown '
+               'object=1234ABCD caller=00870001 thread=12 stackHints=00870001')
+        result = scan_native_teardown([row + ',invalid', row.replace('client-shutdown', 'guessed-reason'),
+                                      row + ',00870001' * 12] + [row] * 40)
+        self.assertEqual(len(result['calls']), 32)
+        self.assertEqual(result['calls'][0]['line'], 4)
+
+    def test_teardown_distinguishes_topology_event_request_and_cleanup(self):
+        operations = ['server-event-16', 'client-event-16', 'server-down-request', 'client-shutdown']
+        rows = [f'20:00:00.125 [12] native teardown: call={i+1} operation={operation} '
+                'object=1234ABCD caller=00870001 thread=12 stackHints='
+                for i, operation in enumerate(operations)]
+        result = scan_native_teardown(rows)
+        self.assertEqual([row['operation'] for row in result['calls']], operations)
+        self.assertNotIn('disconnect_cause', result)
+
+    def test_teardown_report_does_not_promote_gameplay(self):
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            (run / 'coop_net.log').write_text(
+                '20:00:00.125 [12] native teardown: call=1 operation=p2p-shutdown '
+                'object=1234ABCD caller=00870001 thread=12 stackHints=')
+            result = summarize(run, 2)
+            self.assertEqual(len(result['instances'][0]['native_teardown']['calls']), 1)
+            self.assertFalse(result['four_player_campaign_verified'])
+
     def test_nfs_absence_is_not_transfer_success(self):
         result = scan_nfs_ownership([])
         self.assertEqual(result['inbound_trace'], [])
@@ -380,6 +428,37 @@ class HarnessEvidenceTests(unittest.TestCase):
                 (run / f'case_zero_runtime.{instance}.log').write_text(
                     'd3d9: CreateDevice result=00000000\n', encoding='utf-8')
             self.assertTrue(summarize(run, 2)['lobby_frontend_join_verified'])
+
+    def test_lobby_join_evidence_matches_the_instance(self):
+        self.assertFalse(scan_log(['loopback lobby: Player 2 joined lobby'], 2, 4)['lobby_join_requested'])
+        self.assertFalse(scan_log(['loopback lobby: Player 3 joined lobby failed'], 2, 4)['lobby_join_requested'])
+        self.assertTrue(scan_log(['12:00:00.000 [12] loopback lobby: Player 3 joined lobby'], 2, 4)['lobby_join_requested'])
+
+    def test_frontend_join_requires_every_expected_remote(self):
+        for count in (2, 3, 4):
+            with self.subTest(instances=count), TemporaryDirectory() as directory:
+                run = Path(directory)
+                (run / 'outcome.json').write_text(json.dumps({
+                    'Status': 'observation-completed', 'Configuration': {'LobbyProbe': True},
+                    'Processes': [{'ExitedBeforeCleanup': False} for _ in range(count)],
+                }), encoding='utf-8')
+                (run / 'resources.csv').write_text(
+                    'Instance,Alive\n' + ''.join(f'{i},true\n' for i in range(count)), encoding='utf-8')
+                for i in range(count):
+                    (run / f'case_zero_runtime.{i}.log').write_text(
+                        'd3d9: CreateDevice result=00000000\n', encoding='utf-8')
+                for i in range(1, count):
+                    partial = summarize(run, count)
+                    self.assertFalse(partial['lobby_logic_join_verified'])
+                    self.assertFalse(partial['lobby_frontend_join_verified'])
+                    self.assertEqual(partial['missing_lobby_join_instances'], list(range(i, count)))
+                    (run / f'coop_net.{i}.log').write_text(
+                        f'12:00:00.000 loopback lobby: Player {i + 1} joined lobby\n', encoding='utf-8')
+                complete = summarize(run, count)
+                self.assertTrue(complete['lobby_frontend_join_verified'])
+                self.assertEqual(complete['missing_lobby_join_instances'], [])
+                self.assertFalse(complete['native_handshake_observed'])
+                self.assertFalse(complete['four_player_campaign_verified'])
 
     def test_stale_endpoint_age_is_visible(self):
         lines = ['12:00:00.000 invoking BeginDirectP2PGame',

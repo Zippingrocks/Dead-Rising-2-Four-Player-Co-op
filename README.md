@@ -5,7 +5,7 @@ solo, standard two-player co-op, or four-player co-op. **This is not a playable 
 
 ## Current Status
 
-Latest integration checkpoint: `four_instance_20260927_191316`.
+All-client world-application checkpoint: `four_instance_20260927_191316`.
 
 - Four hidden, muted local instances establish native membership and a connection mesh through a local Steam shim.
 - The game activates four human actor slots; separate clothing storage avoids the earlier allocation crashes.
@@ -14,8 +14,13 @@ Latest integration checkpoint: `four_instance_20260927_191316`.
 - Stable four-player campaign play, independent input/replication, remote Steam sessions, and the mode selector
   are not verified or finished. A connected lobby or rendered room is not a gameplay pass.
 
-**Next target:** trace and fix the first post-world-application disconnect/transition while preserving the proven
-data-transfer behavior. See [current state](4-player-coop/docs/current-state.md),
+Latest diagnostic controls preserve the two-player path (`201427`) and expose an incomplete four-player
+frontend join (`202025`). The latter never reaches world application; it is not a disconnect fix. Bounded
+native teardown tracing and stricter per-client lobby evidence are now available.
+
+**Next target:** verify each frontend admission before advancing, then trace the first native disconnect while
+preserving the proven data-transfer behavior. See [disconnect investigation](4-player-coop/docs/native-teardown-investigation.md),
+[current state](4-player-coop/docs/current-state.md),
 [world transition](4-player-coop/docs/world-transition-hold.md), and
 [network-file ownership](4-player-coop/docs/nfs-multi-client-ownership.md).
 
@@ -52,7 +57,7 @@ dotnet build tools/dr2-crash-dump-monitor/DR2CrashDumpMonitor.csproj -c Release
 
 The native scripts default to VS 2022 Community. Pass `-VcVarsPath` pointing to your installation's
 `VC/Auxiliary/Build/vcvars32.bat` for another edition or location. Building does **not** install the DLL or start DR2.
-The Python suite has 70 tests and the native suite has seven executable fixtures at this checkpoint.
+The Python suite has 77 tests and the native suite has seven executable fixtures at this checkpoint.
 Optional reverse-engineering tools use `python -m pip install -r requirements-research.txt` and locally supplied
 images/symbols; neither the proprietary inputs nor their generated symbol tables are included.
 

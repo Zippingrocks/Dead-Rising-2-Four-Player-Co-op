@@ -9,6 +9,17 @@ now delivers and natively applies the world buffer on all three remote clients, 
 hold. Final captures show the safehouse in all four instances, but all three remote clients have a lost-host
 dialog and all meshes end disconnected. This is not stable four-player campaign entry.
 **Step 3 is incomplete; step 4 is not ready.**
+
+Latest diagnostic continuation: `four_instance_20260927_201427` preserves two-player native world application,
+connected final meshes, and safehouse views without recorded faults or teardown calls. Four-player comparison
+`202025` misses Player 3's frontend join and remains at three native members; it does not reach world application
+or exercise teardown. Earlier diagnostic `200435` records a native shutdown from `00864D09` but does not repeat
+all-client world application. Do not merge these different failure stages. Bounded original-call observers now
+cover shutdown, server-down requests, and PC event 16. The reporter no longer labels a partial frontend join as
+verified; re-analysis correctly identifies missing zero-based instance 2. 77 Python tests, seven x86 native fixtures,
+and both synthetic minidump tests pass. Every control restored the baseline runtime, save, render settings, and
+eight archives. See `docs/native-teardown-investigation.md` for exact evidence and the next admission/teardown gate.
+
 See `docs/world-transition-hold.md`. Historical snapshot `game_active` readings before `183105` are invalid:
 the decoder used +0x85 instead of the PC instruction-validated +0x8D. Preserved artifacts are not rewritten.
 

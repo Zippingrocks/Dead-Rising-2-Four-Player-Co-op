@@ -563,6 +563,79 @@ bool InstallNfsOwnershipProbe(BYTE* base) {
   return true;
 }
 
+void LogNativeTeardown(const char* operation, void* object, void* caller) {
+  static LONG calls = 0;
+  const LONG call = InterlockedIncrement(&calls);
+  if (call > 32) return;
+  void* frames[12]{};
+  const USHORT count = CaptureStackBackTrace(1, 12, frames, nullptr);
+  char hints[160]{};
+  size_t used = 0;
+  for (USHORT index = 0; index < count; ++index) {
+    const int written = sprintf_s(hints + used, sizeof(hints) - used, "%s%p", index ? "," : "", frames[index]);
+    if (written <= 0) break;
+    used += static_cast<size_t>(written);
+  }
+  Log("native teardown: call=%ld operation=%s object=%p caller=%p thread=%lu stackHints=%s",
+      call, operation, object, caller, GetCurrentThreadId(), hints);
+}
+
+__declspec(noinline) void __fastcall TraceNativeClientShutdown(void* object, void*) {
+  LogNativeTeardown("client-shutdown", object, _ReturnAddress());
+  reinterpret_cast<void (__thiscall*)(void*)>(0x0087C550)(object);
+}
+
+__declspec(noinline) void __fastcall TraceNativeP2PShutdown(void* object, void*) {
+  LogNativeTeardown("p2p-shutdown", object, _ReturnAddress());
+  reinterpret_cast<void (__thiscall*)(void*)>(0x00876B00)(object);
+}
+
+__declspec(noinline) void __fastcall TraceNativeServerDown(void* object, void*) {
+  if (g_nativeFlowProbe) LogNativeTeardown("server-down-request", object, _ReturnAddress());
+  reinterpret_cast<void (__thiscall*)(void*)>(0x00873BE0)(object);
+}
+
+__declspec(noinline) bool __fastcall TraceNativeClientTopology(void* object, void*, const BYTE* event) {
+  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16)
+    LogNativeTeardown("client-event-16", object, _ReturnAddress());
+  return reinterpret_cast<bool (__thiscall*)(void*, const BYTE*)>(0x008827B0)(object, event);
+}
+
+__declspec(noinline) bool __fastcall TraceNativeServerTopology(void* object, void*, const BYTE* event) {
+  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16)
+    LogNativeTeardown("server-event-16", object, _ReturnAddress());
+  return reinterpret_cast<bool (__thiscall*)(void*, const BYTE*)>(0x00874F20)(object, event);
+}
+
+bool InstallNativeTeardownTrace(BYTE* base) {
+  if (!g_nativeFlowProbe) return true;
+  if (base != reinterpret_cast<BYTE*>(0x00400000)) return false;
+  struct Patch { DWORD slot; void* original; void* replacement; };
+  Patch patches[] = {
+      {0x00CB862C, reinterpret_cast<void*>(0x0087C550), &TraceNativeClientShutdown},
+      {0x00CB86AC, reinterpret_cast<void*>(0x00876B00), &TraceNativeP2PShutdown},
+      {0x00CB8624, reinterpret_cast<void*>(0x008827B0), &TraceNativeClientTopology},
+      {0x00CBCF04, reinterpret_cast<void*>(0x00874F20), &TraceNativeServerTopology},
+  };
+  // These are original PC vtable entries, not OTR offsets or inline detours.
+  for (const auto& patch : patches) {
+    if (*reinterpret_cast<void**>(patch.slot) != patch.original) {
+      Log("native teardown: signature mismatch at %08lX; trace cancelled", patch.slot);
+      return false;
+    }
+  }
+  for (int index = 0; index < static_cast<int>(sizeof(patches) / sizeof(patches[0])); ++index) {
+    if (!WriteSlot(reinterpret_cast<void*>(patches[index].slot), &patches[index].replacement, sizeof(void*))) {
+      for (int undo = index - 1; undo >= 0; --undo)
+        WriteSlot(reinterpret_cast<void*>(patches[undo].slot), &patches[undo].original, sizeof(void*));
+      Log("native teardown: write failure; trace cancelled");
+      return false;
+    }
+  }
+  Log("native teardown: bounded PC client/P2P shutdown tracing installed; original calls preserved");
+  return true;
+}
+
 bool InstallNativeTransitionTrace(BYTE* base) {
   if (!g_harness || !g_hostStateTransferProbe) return true;
   if (base != reinterpret_cast<BYTE*>(0x00400000)) return false;
@@ -576,6 +649,8 @@ bool InstallNativeTransitionTrace(BYTE* base) {
       {0x008820E1, 0x0087CF50, &TraceNativeFlowRegistration, {}},
       {0x00882162, 0x0087CF50, &TraceNativeFlowRegistration, {}},
       {0x00882573, 0x0087CF50, &TraceNativeFlowRegistration, {}},
+      {0x00875082, 0x00873BE0, &TraceNativeServerDown, {}},
+      {0x008829BF, 0x00873BE0, &TraceNativeServerDown, {}},
   };
   for (auto& patch : patches) {
     patch.original[0] = 0xE8;
@@ -600,7 +675,7 @@ bool InstallNativeTransitionTrace(BYTE* base) {
   }
   FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
   Log("native transition: bounded original-call tracing installed; no flow state overrides");
-  return true;
+  return InstallNativeTeardownTrace(base);
 }
 
 bool InstallSyntheticOnlineCleanupGuard(BYTE* base) {
