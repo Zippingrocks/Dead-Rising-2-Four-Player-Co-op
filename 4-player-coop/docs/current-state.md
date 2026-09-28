@@ -1,24 +1,90 @@
 # Four-player campaign co-op: current state
 
-Updated 2026-09-27. This is a research harness, not a playable release.
+Updated 2026-09-28. This is experimental local gameplay, not a finished release.
 
-Two-player control `four_instance_20260927_183105` rendered both players in the safehouse with reciprocal co-op
-HUD markers and no crash through cleanup. Native flow, without harness READY/START signals, delivered and applied
-the world data in order. Independent movement/replication has not been tested. Four-player control `191316`
-now delivers and natively applies the world buffer on all three remote clients, resolving the earlier delivery
-hold. Final captures show the safehouse in all four instances, but all three remote clients have a lost-host
-dialog and all meshes end disconnected. This is not stable four-player campaign entry.
-**Step 3 is incomplete; step 4 is not ready.**
+Run `four_instance_20260928_135823` restores the four-player campaign path after
+the frontend navigation harness was made tolerant of missing menu-key release
+acknowledgements during screen transitions. The wrapper completed normally and
+verified baseline DLL, original save, render settings, and all nine temporary
+stock content archives were restored; no DR2 process remained. Host admission
+accepted peers `...0001`, `...0002`, and `...0003`; final mesh snapshots show all
+three remote endpoint states at 6, native meshes connected, four-player clothing
+capacity active with four live heap sets, and all four actor slots visible and
+unhidden in the safehouse. After admission, private W-key pulses were sent to
+P1/P2/P3/P4 with exact down/up acknowledgements; the post-input snapshot at
+14:09:09 shows player positions replicated across peers and players 2-4 moved
+materially from the admission cluster. This is now real local four-player
+campaign control evidence. Combat/damage, revive/down states, complete partner
+HUDs, another area transition, production Steam, and a user-facing solo/2P/4P
+selector remain open.
 
-Latest diagnostic continuation: `four_instance_20260927_201427` preserves two-player native world application,
-connected final meshes, and safehouse views without recorded faults or teardown calls. Four-player comparison
-`202025` misses Player 3's frontend join and remains at three native members; it does not reach world application
-or exercise teardown. Earlier diagnostic `200435` records a native shutdown from `00864D09` but does not repeat
-all-client world application. Do not merge these different failure stages. Bounded original-call observers now
-cover shutdown, server-down requests, and PC event 16. The reporter no longer labels a partial frontend join as
-verified; re-analysis correctly identifies missing zero-based instance 2. 77 Python tests, seven x86 native fixtures,
-and both synthetic minidump tests pass. Every control restored the baseline runtime, save, render settings, and
-eight archives. See `docs/native-teardown-investigation.md` for exact evidence and the next admission/teardown gate.
+Run `four_instance_20260928_002321` also proved a host-to-P4 bat transfer across
+all four inventories and gathered all four at the native safehouse vent. The
+normal exit interaction started a transition but crashed in all four processes
+while loading a modified SawBlade vertex declaration. That installed compressed
+asset fails its checksum; the preserved PC original passes. A new opt-in stock
+global-archive swap isolates this content confound without discarding port work.
+The later `005833` control proved the same exit can survive with stock streamed
+assets; the `135823` control restored reliable four-player admission afterward.
+The next gate is to combine post-transition movement/control with combat and
+damage checks. See the gameplay validation document for hashes and evidence.
+
+Completed run `four_instance_20260927_234621` captured four distinct physical
+Chuck bodies in one room and recognized independent private mouse/camera input.
+The read-only PC logical-button observer confirms held attacks reach native
+button records, but no damage verdict is claimed. Native bathroom door opening
+and the host's replicated movement through it are now observed. An area
+transition, combat/damage, revive, complete partner HUDs, production Steam and
+the user-facing mode selector remain open. All four independently traversed the
+bathroom door into the corridor. The 30-minute observation completed without an
+early process exit or recorded native fault, and restoration verified. See
+`four-player-gameplay-validation.md` for exact evidence and limitations.
+
+Latest control `four_instance_20260927_224611`: the corrected acknowledgement
+protocol passed a full native pause/resume cycle initiated by each of P1/P2/P3/P4.
+Every participant reached the expected paused masks and then all-zero masks.
+Post-resume isolated movement/convergence passed for all four owners, with the
+original tolerances unchanged. Earlier crowded-spawn failures remain recorded.
+Mouse/cursor camera response has since been observed; combat remains unproven;
+partner HUDs, transitions, revive and production Steam still remain open.
+
+Latest gameplay control `four_instance_20260927_215228`: all four owners passed
+separate private-input movement/convergence trials. The host dropped a bat and
+Player 3 picked it up; all four inventories agree on the transfer of item 0xA8.
+The ten-minute observation retained connected meshes without recorded faults or
+teardown. **That run exposed the pause/resume blocker now addressed above:** after native menus closed, P1/P2/P3
+remained waiting on another player. Client camera framing and partner HUDs also
+need work. At that point four-body visual proof, combat, revive, transitions and
+production Steam were unverified. See `four-player-gameplay-validation.md` for the exact
+trials, failed trials, evidence boundaries and pause diagnostic. Run `221105`
+confirmed native player count four and a stuck [8,8,8,0] pause quorum on all peers;
+that historical failure was compared with two-player pause behavior before the
+acknowledgement fix above was implemented.
+
+Four-player control `four_instance_20260927_214248` delivered and natively applied the host world on all three
+clients, activated all four actor slots with correct local/remote ownership, and retained connected native
+meshes through the 90-second observation interval. No runtime faults, native teardown calls, quit requests,
+shutdown events or desync assertions were recorded. Final captures show actual safehouse gameplay, but do not
+yet establish four independently controlled bodies in one unobstructed view. Movement was unverified in
+that run and was subsequently checked in `215228` above. **Complete gameplay and production Steam
+support remain unverified. This is a campaign-entry milestone, not a playable release.**
+
+Diagnostics `212632`/`213436` identified a real ordering race: native PlayerCycleItems event 0x16 referred to
+item 0xA8 before the receiving client had restored that item during world application. The same ID resolves
+successfully milliseconds later during native inventory restoration. The four-player harness-only
+`-coopjipbroadcastqueue` candidate retains incoming gameplay event bytes during JIP, then replays them through
+the original native processor after actual world completion. It does not suppress assertions or fabricate
+readiness. Run `214248` replayed 30/34/35 events on P2/P3/P4; candidate SHA256
+`D69909459A881E8231229CCF54FBC86D12C82D990739F4928EE73B60B8C264C2`.
+Two-player control `201427` retains connected final meshes and safehouse views without faults or teardown.
+
+Sequential input and joins now require fresh acknowledgements from each owned PID. A failed/missing frontend
+join cannot be counted as success. GPU frame capture runs only on Present, not the scripted-input poller.
+A read-only actor sampler records validated identities, ownership, hidden flags and positions; existing samples
+do not establish four rendered actors or independent movement replication. 89 Python tests, eight x86 native
+fixtures, and the admission-control fixture pass. Completed controls restored baseline DLL, original save,
+settings and eight archives. See `docs/native-teardown-investigation.md` and
+`docs/four-player-gameplay-validation.md` for evidence and the acceptance gates.
 
 See `docs/world-transition-hold.md`. Historical snapshot `game_active` readings before `183105` are invalid:
 the decoder used +0x85 instead of the PC instruction-validated +0x8D. Preserved artifacts are not rewritten.

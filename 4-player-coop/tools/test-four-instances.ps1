@@ -3,7 +3,7 @@ param(
     [int]$Instances = 4,
     [ValidateSet(2, 4)]
     [int]$SessionPlayers = 4,
-    [ValidateRange(20, 600)]
+    [ValidateRange(20, 3600)]
     [int]$DurationSeconds = 90,
     [ValidateRange(1, 30)]
     [int]$LaunchStaggerSeconds = 10,
@@ -33,9 +33,13 @@ param(
     [switch]$HostStateTransferProbe,
     [switch]$NativeFlowProbe,
     [switch]$NfsOwnershipProbe,
+    [switch]$JipBroadcastQueueProbe,
+    [switch]$PauseAcknowledgementProbe,
+    [switch]$PrivateMouseProbe,
     [switch]$MeshListenerProbe,
     [switch]$ClothingCapacityProbe,
     [switch]$StockSafehouseContent,
+    [switch]$StockStreamedAssetsContent,
     [switch]$NetworkSnapshots,
     [switch]$KeepRunning
 )
@@ -47,7 +51,13 @@ if ($Instances -gt $SessionPlayers) { throw 'Instances must not exceed SessionPl
 if ($NfsOwnershipProbe -and (-not $NativeFlowProbe -or $SessionPlayers -ne 4)) {
     throw 'NFS ownership probe requires four-player native-flow control'
 }
-if ($StockSafehouseContent -and $KeepRunning) { throw 'Temporary content requires automatic child cleanup' }
+if ($JipBroadcastQueueProbe -and (-not $NativeFlowProbe -or $SessionPlayers -ne 4)) {
+    throw 'JIP broadcast queue requires four-player native-flow control'
+}
+if ($PauseAcknowledgementProbe -and (-not $NativeFlowProbe -or $SessionPlayers -ne 4)) {
+    throw 'Pause acknowledgement probe requires four-player native-flow control'
+}
+if (($StockSafehouseContent -or $StockStreamedAssetsContent) -and $KeepRunning) { throw 'Temporary content requires automatic child cleanup' }
 if ($NativeFlowProbe -and (-not $HostStateTransferProbe -or -not $ConfirmCampaignAdmission -or $ClientTransitionProbe)) {
     throw 'Native flow control requires transfer observation and confirmed admission, without forced client transition'
 }
@@ -75,9 +85,13 @@ $outcome = [ordered]@{
         HostStateTransferProbe = [bool]$HostStateTransferProbe;
         NativeFlowProbe = [bool]$NativeFlowProbe;
         NfsOwnershipProbe = [bool]$NfsOwnershipProbe;
+        JipBroadcastQueueProbe = [bool]$JipBroadcastQueueProbe;
+        PauseAcknowledgementProbe = [bool]$PauseAcknowledgementProbe;
+        PrivateMouseProbe = [bool]$PrivateMouseProbe;
         MeshListenerProbe = [bool]$MeshListenerProbe;
         ClothingCapacityProbe = [bool]$ClothingCapacityProbe;
         StockSafehouseContent = [bool]$StockSafehouseContent;
+        StockStreamedAssetsContent = [bool]$StockStreamedAssetsContent;
         NetworkSnapshots = [bool]$NetworkSnapshots;
         SaveProbe = [bool]$SaveProbe; SaveFixturePath = $SaveFixturePath; ThreadSnapshots = [bool]$ThreadSnapshots;
         MenuProbe = [bool]$MenuProbe; LobbyProbe = [bool]$LobbyProbe;
@@ -97,6 +111,7 @@ $desktops = @()
 $previousSteamAppId = $env:SteamAppId
 $previousSteamGameId = $env:SteamGameId
 $previousSaveRoot = $env:DR2_COOP_SAVE_ROOT
+$previousDumpRoot = $env:DR2_COOP_DUMP_ROOT
 
 Add-Type -Namespace CoopHarness -Name Window -MemberDefinition @'
     [DllImport("user32.dll")]
@@ -233,24 +248,59 @@ function Pulse-Key([int]$instance, [int]$scanCode) {
     Start-Sleep -Milliseconds 280
 }
 
+function Read-InstanceTrace([int]$instance) {
+    $name = if ($instance -eq 0) { 'coop_net.log' } else { "coop_net.$instance.log" }
+    $path = Join-Path $GameRoot $name
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $reader = [IO.StreamReader]::new($stream)
+    try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    $header = [regex]::Match($text, '(?m)^.*co-op runtime loaded:.* instance=(\d+) requestedPlayers=\d+ pid=(\d+)\r?$')
+    if (-not $header.Success -or [int]$header.Groups[1].Value -ne $instance -or
+        [int]$header.Groups[2].Value -ne $started[$instance].Id) { return '' }
+    return $text
+}
+
+function Wait-InstanceTrace([int]$instance, [string]$pattern, [int]$requiredMatches = 1,
+                            [int]$timeoutSeconds = 20) {
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Assert-HarnessProcessesAlive
+        if (-not (Test-MemoryBudget)) { throw $outcome.Reason }
+        if ([regex]::Matches((Read-InstanceTrace $instance), $pattern).Count -ge $requiredMatches) { return }
+        Start-Sleep -Milliseconds 200
+    } while ($deadline.Elapsed.TotalSeconds -lt $timeoutSeconds)
+    throw "Instance $instance did not produce expected trace within ${timeoutSeconds}s: $pattern"
+}
+
 function Pulse-AllKeys([int]$scanCode, [int]$holdMilliseconds = 1800) {
-    foreach ($instance in 0..($Instances - 1)) {
-        [IO.File]::WriteAllText((Join-Path $GameRoot "coop_input.$instance.txt"), [string]$scanCode)
-    }
-    Start-Sleep -Milliseconds $holdMilliseconds
-    foreach ($instance in 0..($Instances - 1)) {
-        Remove-Item -LiteralPath (Join-Path $GameRoot "coop_input.$instance.txt") -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 2
+    Pulse-InstanceKeys @(0..($Instances - 1)) $scanCode $holdMilliseconds
 }
 
 function Pulse-InstanceKeys([int[]]$targetInstances, [int]$scanCode, [int]$holdMilliseconds = 1800) {
-    foreach ($instance in $targetInstances) {
-        [IO.File]::WriteAllText((Join-Path $GameRoot "coop_input.$instance.txt"), [string]$scanCode)
+    $down = "(?m)script input: DIK=$scanCode down\r?$"
+    $up = "(?m)script input: DIK=$scanCode up\r?$"
+    $counts = @{}
+    try {
+        foreach ($instance in $targetInstances) {
+            $trace = Read-InstanceTrace $instance
+            $counts[$instance] = @(([regex]::Matches($trace, $down).Count + 1), ([regex]::Matches($trace, $up).Count + 1))
+            [IO.File]::WriteAllText((Join-Path $GameRoot "coop_input.$instance.txt"), [string]$scanCode)
+        }
+        foreach ($instance in $targetInstances) { Wait-InstanceTrace $instance $down $counts[$instance][0] 5 }
+        Start-Sleep -Milliseconds $holdMilliseconds
+    } finally {
+        foreach ($instance in $targetInstances) {
+            Remove-Item -LiteralPath (Join-Path $GameRoot "coop_input.$instance.txt") -Force -ErrorAction SilentlyContinue
+        }
     }
-    Start-Sleep -Milliseconds $holdMilliseconds
     foreach ($instance in $targetInstances) {
-        Remove-Item -LiteralPath (Join-Path $GameRoot "coop_input.$instance.txt") -Force -ErrorAction SilentlyContinue
+        try {
+            Wait-InstanceTrace $instance $up $counts[$instance][1] 20
+        } catch {
+            Write-Warning "Instance $instance did not acknowledge frontend key release for DIK=$scanCode after command removal: $($_.Exception.Message)"
+        }
     }
     Start-Sleep -Seconds 2
 }
@@ -272,27 +322,43 @@ function Request-Captures {
                 Write-Warning "Read-only network snapshot failed for instance $instance; see $path.stderr.txt"
             }
         }
+        $path = Join-Path $runRoot "campaign-players.$networkSnapshotIndex.json"
+        $players = & python (Join-Path $PSScriptRoot 'snapshot_campaign_players.py') --pid $started.Id 2> "$path.stderr.txt"
+        if ($LASTEXITCODE -eq 0) {
+            $players | Set-Content -LiteralPath $path
+        } else {
+            Write-Warning "Read-only campaign player snapshot failed; see $path.stderr.txt"
+        }
         $script:networkSnapshotIndex++
     }
 }
 
 function Stage-StockSafehouse {
-    if (-not $StockSafehouseContent) { return }
+    if (-not $StockSafehouseContent -and -not $StockStreamedAssetsContent) { return }
     $originalRoot = Join-Path $workspace 'backups\dead_rising_2_pc\environment\safehouse'
     $liveRoot = Join-Path $GameRoot 'data\models\environment\safehouse'
     $backupRoot = Join-Path $runRoot 'content-before\safehouse'
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
     $names = @('safehouse.big', 'safehouse_after.big', 'safehouse_breach.big', 'safehouse_laptop.big',
         'safehouse_persistent.big', 'safehouse_poker.big', 'zonelist.big', 'zonelist_safehouse_poker.big')
+    $files = @(if ($StockSafehouseContent) { foreach ($name in $names) {
+        [pscustomobject]@{Live=(Join-Path $liveRoot $name);Original=(Join-Path $originalRoot $name);
+            Backup=(Join-Path $backupRoot $name)}
+    } })
+    if ($StockStreamedAssetsContent) {
+        $files += [pscustomobject]@{Live=(Join-Path $GameRoot 'data\streamedassets.big');
+            Original=(Join-Path $workspace 'backups\dead_rising_2_pc\streamedassets\streamedassets.big.original');
+            Backup=(Join-Path $runRoot 'content-before\streamedassets.big')}
+    }
     # Preserve and hash the complete set before changing any installed archive.
-    $script:contentSwap = @(foreach ($name in $names) {
-        $live = Join-Path $liveRoot $name
-        $original = Join-Path $originalRoot $name
-        $backup = Join-Path $backupRoot $name
+    $script:contentSwap = @(foreach ($file in $files) {
+        $live = $file.Live
+        $original = $file.Original
+        $backup = $file.Backup
         $before = (Get-FileHash -LiteralPath $live -Algorithm SHA256).Hash
         $stock = (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash
         Copy-Item -LiteralPath $live -Destination $backup
-        if ((Get-FileHash -LiteralPath $backup).Hash -ne $before) { throw "Content backup mismatch: $name" }
+        if ((Get-FileHash -LiteralPath $backup).Hash -ne $before) { throw "Content backup mismatch: $live" }
         [pscustomobject]@{ Live = $live; Original = $original; Backup = $backup;
             BeforeSha256 = $before; StockSha256 = $stock; Installed = $false; Restored = $false }
     })
@@ -337,6 +403,11 @@ function Restore-TestContent {
 }
 
 if (Get-Process deadrising2 -ErrorAction SilentlyContinue) { throw "deadrising2.exe is already running" }
+foreach ($instance in 0..($Instances - 1)) {
+    foreach ($name in @("coop_input.$instance.txt", "coop_mouse.$instance.txt")) {
+        if (Test-Path -LiteralPath (Join-Path $GameRoot $name)) { throw "Stale input command must be preserved/reviewed before launch: $name" }
+    }
+}
 if (-not (Test-Path -LiteralPath $gameExe)) { throw "Missing game executable: $gameExe" }
 $outcome.RuntimeSha256 = (Get-FileHash -LiteralPath (Join-Path $GameRoot 'dinput8.dll') -Algorithm SHA256).Hash
 if (($CrashMonitor -or $ThreadSnapshots) -and -not (Test-Path -LiteralPath $monitorExe)) { throw "Missing crash monitor: $monitorExe" }
@@ -372,6 +443,7 @@ try {
         $fps = if ($MenuProbe -or $LobbyProbe -or $CampaignMenuProbe -or $CampaignLaunchProbe) { 60 } elseif ($instance -eq 0) { 30 } else { 15 }
         $arguments = "-campaign=vanilla_dr2 -cooptrace -coopinstance=$instance -coopplayers=$SessionPlayers -cooptestinstances=$Instances -coopfps=$fps -coopsilent"
         $env:DR2_COOP_SAVE_ROOT = Join-Path $runRoot "save.$instance"
+        $env:DR2_COOP_DUMP_ROOT = $runRoot
         New-Item -ItemType Directory -Path $env:DR2_COOP_SAVE_ROOT | Out-Null
         if ($SaveFixturePath) {
             $privateSaveName = "C4P{0}SAVE.DR2S" -f $instance
@@ -392,6 +464,9 @@ try {
         if ($HostStateTransferProbe) { $arguments += ' -coophoststatetransfer' }
         if ($NativeFlowProbe) { $arguments += ' -coopnativeflowprobe' }
         if ($NfsOwnershipProbe) { $arguments += ' -coopnfsownershipprobe' }
+        if ($JipBroadcastQueueProbe) { $arguments += ' -coopjipbroadcastqueue' }
+        if ($PauseAcknowledgementProbe) { $arguments += ' -cooppauseackprobe' }
+        if ($PrivateMouseProbe) { $arguments += ' -coopprivatemouse' }
         if ($MeshListenerProbe) { $arguments += ' -coopmeshlistenerprobe' }
         if ($ClothingCapacityProbe) { $arguments += ' -coopclothingcapacityprobe' }
         if ($LobbyProbe) { $arguments += ' -cooplobbyfrontend' }
@@ -487,6 +562,8 @@ try {
                         Pulse-InstanceKeys @($joiner) 28
                         Start-Sleep -Seconds 15
                         Request-Captures
+                        # A key press is not a join. Require this process's frontend callback before accepting it.
+                        Wait-InstanceTrace $joiner ("(?m)loopback lobby: Player {0} joined lobby\r?$" -f ($joiner + 1))
                         if ($CampaignAdmissionProbe) {
                             # A successful lobby/P2P join raises the host's stock Incoming co-op call prompt.
                             # C opens the native YES/NO admission dialog; it does not accept the caller.
@@ -501,6 +578,10 @@ try {
                                 Start-Sleep -Seconds 8
                                 Request-Captures
                             }
+                        }
+                        if ($ConfirmCampaignAdmission) {
+                            $peer = '{0:X16}' -f ([uint64]0x0110000170000000 + $joiner)
+                            Wait-InstanceTrace 0 ("client table: slot=\d+ peer=$peer index=\d+ confirmed=1 leaving=0")
                         }
                     }
                 } else {
@@ -565,6 +646,7 @@ try {
     $env:SteamAppId = $previousSteamAppId
     $env:SteamGameId = $previousSteamGameId
     $env:DR2_COOP_SAVE_ROOT = $previousSaveRoot
+    $env:DR2_COOP_DUMP_ROOT = $previousDumpRoot
     $outcome.Processes = @($started | ForEach-Object {
         $_.Refresh()
         [pscustomobject]@{ Pid = $_.Id; ExitedBeforeCleanup = $_.HasExited;
@@ -573,8 +655,23 @@ try {
     $outcome | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runRoot 'outcome.json')
     if (-not $KeepRunning -or $outcome.Status -ne 'observation-completed') { Stop-HarnessProcesses }
     foreach ($monitor in $monitors) {
-        if (-not $monitor.WaitForExit(15000)) {
+        # Full-memory dumps can take minutes under simultaneous four-process I/O.
+        # This affects debugger cleanup only, never a native gameplay timeout.
+        if (-not $monitor.WaitForExit(180000)) {
+            Write-Warning "Crash monitor $($monitor.Id) did not finish within 180 seconds; any dump may be incomplete"
+            $outcome['CrashEvidenceIncomplete'] = $true
             Stop-Process -Id $monitor.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($CrashMonitor) {
+        try {
+            $dumpCheck = & python (Join-Path $PSScriptRoot 'validate_minidump.py') --run-root $runRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Minidump checker failed' }
+            $dumpCheck | Set-Content -LiteralPath (Join-Path $runRoot 'dump-validation.json')
+            if (($dumpCheck | ConvertFrom-Json).incomplete) { $outcome['CrashEvidenceIncomplete'] = $true }
+        } catch {
+            $outcome['CrashEvidenceIncomplete'] = $true
+            Write-Warning 'Dump validation failed; retained files are not verified crash evidence'
         }
     }
     foreach ($desktop in $desktops) {
@@ -583,6 +680,7 @@ try {
     foreach ($instance in 0..($Instances - 1)) {
         Remove-Item -LiteralPath (Join-Path $GameRoot "coop_input.$instance.txt") -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $GameRoot "coop_capture.$instance.flag") -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $GameRoot "coop_mouse.$instance.txt") -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 2
     for ($instance = 0; $instance -lt $started.Count; $instance++) {
