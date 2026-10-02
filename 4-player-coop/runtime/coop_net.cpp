@@ -7,7 +7,7 @@
 //     through transparent vtable proxies, plus Steam callback registrations and Winsock traffic.
 //   * -coopinstance=N (N = 1..3) marks an extra instance started by the one-PC test harness: the game's
 //     single-instance mutex "DeadRising2" gets a per-instance name and the log goes to coop_net.<N>.log.
-// Nothing here changes game behaviour when neither switch is present.
+// A normal Steam launch activates the production path only when four_player_coop.ini is installed beside the game.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -26,6 +26,7 @@
 #include "jip_broadcast_queue.h"
 #include "pause_acknowledgement.h"
 #include "harness_cursor.h"
+#include "matchmaking_policy.h"
 
 namespace coop_clothing {
 Owners g_owners;
@@ -50,6 +51,9 @@ namespace {
 
 bool g_trace = false;
 bool g_harness = false;
+bool g_production = false;
+void* volatile g_productionMatchmaking = nullptr;
+__declspec(align(8)) volatile LONG64 g_productionLobby = 0;
 bool g_silent = false;
 bool g_isolatedDesktop = false;
 bool g_directP2PProbe = false;
@@ -173,6 +177,7 @@ LocalServerAcceptFn g_localServerAccept = nullptr;
 using CanListenFn = bool(__thiscall*)(void*, const unsigned long long*, const unsigned long long*, const unsigned short*);
 CanListenFn g_canListen = nullptr;
 bool InstallJoinPolicyTrace(BYTE* base);
+volatile LONG g_joinPolicyInstalled = 0;
 volatile LONG g_lobbyFrontendObserverStarted = 0;
 bool StartLobbyFrontendObserver();
 void Log(const char* format, ...);
@@ -292,6 +297,23 @@ bool __fastcall Hook_LocalServerAccept(void* server, void*, void* client, void* 
 
 bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* nonce,
                               const unsigned long long* peer, const unsigned short* port) {
+  if (g_production) {
+    void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
+    const unsigned long long lobby = static_cast<unsigned long long>(
+        InterlockedCompareExchange64(&g_productionLobby, 0, 0));
+    const char* protocol = nullptr;
+    if (matchmaking && lobby && peer) {
+      using GetMemberData_t = const char*(__thiscall*)(void*, unsigned long long, unsigned long long, const char*);
+      protocol = reinterpret_cast<GetMemberData_t>((*reinterpret_cast<void***>(matchmaking))[24])(
+          matchmaking, lobby, *peer, coop_matchmaking::kProtocolKey);
+    }
+    if (!coop_matchmaking::IsCompatible(protocol)) {
+      Log("production admission: rejected untagged peer=%08lX%08lX protocol='%s'",
+          peer ? static_cast<DWORD>(*peer >> 32) : 0, peer ? static_cast<DWORD>(*peer) : 0,
+          protocol ? protocol : "<null>");
+      return false;
+    }
+  }
   const bool result = g_canListen(query, nonce, peer, port);
   static volatile LONG diagnosticCalls = 0;
   if (g_meshListenerProbe && InterlockedIncrement(&diagnosticCalls) <= 16) {
@@ -2335,6 +2357,63 @@ void (*const kThunks[kSlots])() = {Thunk0, Thunk1, Thunk2, Thunk3, Thunk4, Thunk
                                    COOP_REF10(6), COOP_REF10(7)};
 void* g_thunkTables[kInterfaceCount][kSlots];
 
+template <typename Method>
+Method RealMethod(Proxy* proxy, int slot) {
+  return reinterpret_cast<Method>((*reinterpret_cast<void***>(proxy->real))[slot]);
+}
+
+unsigned long long __fastcall Mod_Matchmaking_RequestLobbyList(Proxy* proxy, void*) {
+  using AddFilter_t = void(__thiscall*)(void*, const char*, const char*, int);
+  using Request_t = unsigned long long(__thiscall*)(void*);
+  RealMethod<AddFilter_t>(proxy, 5)(proxy->real, coop_matchmaking::kProtocolKey,
+      coop_matchmaking::kProtocolValue, 0);
+  Log("production matchmaking: required %s=%s", coop_matchmaking::kProtocolKey,
+      coop_matchmaking::kProtocolValue);
+  return RealMethod<Request_t>(proxy, 4)(proxy->real);
+}
+
+unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, int type, int) {
+  using Method_t = unsigned long long(__thiscall*)(void*, int, int);
+  Log("production matchmaking: CreateLobby type=%d limit=%d", type, coop_matchmaking::kMemberLimit);
+  return RealMethod<Method_t>(proxy, 13)(proxy->real, type, coop_matchmaking::kMemberLimit);
+}
+
+unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, unsigned long long lobby) {
+  using GetData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+  using Join_t = unsigned long long(__thiscall*)(void*, unsigned long long);
+  const char* protocol = RealMethod<GetData_t>(proxy, 19)(proxy->real, lobby, coop_matchmaking::kProtocolKey);
+  if (!coop_matchmaking::IsCompatible(protocol)) {
+    Log("production matchmaking: rejected incompatible lobby=%08lX%08lX protocol='%s'",
+        static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>");
+    return 0;
+  }
+  Log("production matchmaking: accepted compatible lobby=%08lX%08lX",
+      static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby));
+  InterlockedExchange64(&g_productionLobby, static_cast<LONG64>(lobby));
+  return RealMethod<Join_t>(proxy, 14)(proxy->real, lobby);
+}
+
+BOOL __fastcall Mod_Matchmaking_SetLobbyData(Proxy* proxy, void*, unsigned long long lobby,
+                                              const char* key, const char* value) {
+  using Method_t = BOOL(__thiscall*)(void*, unsigned long long, const char*, const char*);
+  Method_t set = RealMethod<Method_t>(proxy, 20);
+  const bool protocolKey = key && _stricmp(key, coop_matchmaking::kProtocolKey) == 0;
+  const BOOL original = set(proxy->real, lobby, protocolKey ? coop_matchmaking::kProtocolKey : key,
+                            protocolKey ? coop_matchmaking::kProtocolValue : value);
+  const BOOL tagged = protocolKey ? original : set(proxy->real, lobby, coop_matchmaking::kProtocolKey,
+                                                    coop_matchmaking::kProtocolValue);
+  if (tagged) InterlockedExchange64(&g_productionLobby, static_cast<LONG64>(lobby));
+  Log("production matchmaking: tagged lobby=%08lX%08lX %s=%s result=%d",
+      static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), coop_matchmaking::kProtocolKey,
+      coop_matchmaking::kProtocolValue, tagged);
+  return original && tagged;
+}
+
+BOOL __fastcall Mod_Matchmaking_SetLobbyMemberLimit(Proxy* proxy, void*, unsigned long long lobby, int) {
+  using Method_t = BOOL(__thiscall*)(void*, unsigned long long, int);
+  return RealMethod<Method_t>(proxy, 31)(proxy->real, lobby, coop_matchmaking::kMemberLimit);
+}
+
 constexpr unsigned long long kLocalSteamIdPrefix = 0x0110000100000000ULL;
 constexpr unsigned int kLocalAccountBase = 0x70000000;
 const char* const kLocalPlayerNames[] = {"Player 1", "Player 2", "Player 3", "Player 4"};
@@ -3007,7 +3086,8 @@ Proxy g_proxies[16];
 int g_proxyCount = 0;
 
 void* Wrap(void* real, int iface) {
-  if (!real || !g_trace) return real;
+  if (!real || (!g_trace && !g_harness && !(g_production && iface == kMatchmaking))) return real;
+  if (g_production && iface == kMatchmaking) InterlockedExchangePointer(&g_productionMatchmaking, real);
   EnterCriticalSection(&g_lock);
   for (int i = 0; i < g_proxyCount; i++) {
     if (g_proxies[i].real == real) {
@@ -3131,6 +3211,17 @@ void __cdecl Hook_RunCallbacksImpl() {
   // evidence needed to synthesize P2PSessionRequest_t.
   if (g_harness) DispatchP2PSessionRequest();
   if (Real_RunCallbacks) Real_RunCallbacks();
+  if (g_production) {
+    static volatile LONG memberTagPumps = 0;
+    const LONG pump = InterlockedIncrement(&memberTagPumps);
+    void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
+    const unsigned long long lobby = static_cast<unsigned long long>(InterlockedCompareExchange64(&g_productionLobby, 0, 0));
+    if (matchmaking && lobby && (pump <= 300 || pump % 600 == 0)) {
+      using SetMemberData_t = void(__thiscall*)(void*, unsigned long long, const char*, const char*);
+      reinterpret_cast<SetMemberData_t>((*reinterpret_cast<void***>(matchmaking))[25])(
+          matchmaking, lobby, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue);
+    }
+  }
   if (g_harness) {
     DispatchFakeCalls();
     if (g_instance == 0) {
@@ -4546,7 +4637,12 @@ bool InstallCampaignAdmissionCapacity(BYTE* base) {
 }
 
 bool InstallJoinPolicyTrace(BYTE* base) {
+  if (InterlockedCompareExchange(&g_joinPolicyInstalled, 0, 0) == 1) return true;
   void** canListenSlot = reinterpret_cast<void**>(base + (0x00CB83C0 - 0x00400000));
+  if (*canListenSlot == &Hook_CanListen) {
+    InterlockedExchange(&g_joinPolicyInstalled, 1);
+    return true;
+  }
   if (*canListenSlot != base + (0x00863D40 - 0x00400000)) {
     Log("join policy: CanListen signature mismatch; probe cancelled");
     return false;
@@ -4554,7 +4650,21 @@ bool InstallJoinPolicyTrace(BYTE* base) {
   g_canListen = reinterpret_cast<CanListenFn>(*canListenSlot);
   void* replacement = &Hook_CanListen;
   if (!WriteSlot(canListenSlot, &replacement, sizeof(replacement))) return false;
+  InterlockedExchange(&g_joinPolicyInstalled, 1);
   return true;
+}
+
+DWORD WINAPI ProductionPatchThread(LPVOID) {
+  BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+  for (int wait = 0; wait < 1200; wait++) {
+    if (InstallCampaignAdmissionCapacity(base) && InstallJoinPolicyTrace(base)) {
+      Log("production co-op: four-player campaign capacity and mod-only admission installed");
+      return 0;
+    }
+    Sleep(100);
+  }
+  Log("production co-op: native signatures never became available; admission remains disabled");
+  return 0;
 }
 
 DWORD WINAPI DirectHostProbeThread(LPVOID) {
@@ -5092,10 +5202,14 @@ void Initialize(const wchar_t* root) {
   const wchar_t* commandLine = GetCommandLineW();
   g_trace = GetPrivateProfileIntW(L"Coop", L"Trace", 0, ini) != 0 || wcsstr(commandLine, L"-cooptrace") != nullptr;
   g_harness = wcsstr(commandLine, L"-coopinstance=") != nullptr;
+  wchar_t productionIni[MAX_PATH];
+  swprintf(productionIni, MAX_PATH, L"%sfour_player_coop.ini", root);
+  g_production = !g_harness && GetFileAttributesW(productionIni) != INVALID_FILE_ATTRIBUTES &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"Enabled", 1, productionIni) != 0;
   g_silent = g_harness && wcsstr(commandLine, L"-coopsilent") != nullptr;
   g_isolatedDesktop = g_harness && wcsstr(commandLine, L"-coopdesktop") != nullptr;
   g_instance = ArgumentInt(commandLine, L"-coopinstance=", 0);
-  g_requestedPlayers = ArgumentInt(commandLine, L"-coopplayers=", 0);
+  g_requestedPlayers = ArgumentInt(commandLine, L"-coopplayers=", g_production ? 4 : 0);
   g_testInstances = ArgumentInt(commandLine, L"-cooptestinstances=", 1);
   if (g_instance < 0 || g_instance > 3) g_instance = 0;
   if (g_testInstances < 1 || g_testInstances > 4) g_testInstances = 1;
@@ -5123,7 +5237,7 @@ void Initialize(const wchar_t* root) {
   g_lobbyFrontendProbe = g_harness && wcsstr(commandLine, L"-cooplobbyfrontend") != nullptr;
   g_bridgeFourthPeer = g_directP2PProbe &&
       wcsstr(commandLine, L"-coopbridgefourth") != nullptr;
-  if (!g_trace && !g_harness) return;
+  if (!g_trace && !g_harness && !g_production) return;
 
   InitializeCriticalSection(&g_lock);
   if (g_harness) SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
@@ -5180,16 +5294,26 @@ void Initialize(const wchar_t* root) {
     g_thunkTables[kFriends][5] = reinterpret_cast<void*>(Fake_Friends_GetFriendRelationship);
     g_thunkTables[kFriends][6] = reinterpret_cast<void*>(Fake_Friends_GetFriendPersonaState);
     g_thunkTables[kFriends][7] = reinterpret_cast<void*>(Fake_Friends_GetFriendPersonaName);
+  } else if (g_production) {
+    g_thunkTables[kMatchmaking][4] = reinterpret_cast<void*>(Mod_Matchmaking_RequestLobbyList);
+    g_thunkTables[kMatchmaking][13] = reinterpret_cast<void*>(Mod_Matchmaking_CreateLobby);
+    g_thunkTables[kMatchmaking][14] = reinterpret_cast<void*>(Mod_Matchmaking_JoinLobby);
+    g_thunkTables[kMatchmaking][20] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyData);
+    g_thunkTables[kMatchmaking][31] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyMemberLimit);
   }
   wchar_t logPath[MAX_PATH];
   if (g_instance > 0) swprintf(logPath, MAX_PATH, L"%scoop_net.%d.log", root, g_instance);
   else swprintf(logPath, MAX_PATH, L"%scoop_net.log", root);
   g_log = _wfsopen(logPath, L"w", _SH_DENYWR);
-  Log("co-op runtime loaded: trace=%d harness=%d silent=%d instance=%d requestedPlayers=%d pid=%lu",
-      g_trace, g_harness, g_silent, g_instance, g_requestedPlayers, GetCurrentProcessId());
+  Log("co-op runtime loaded: trace=%d harness=%d production=%d silent=%d instance=%d requestedPlayers=%d pid=%lu",
+      g_trace, g_harness, g_production, g_silent, g_instance, g_requestedPlayers, GetCurrentProcessId());
   if (g_directP2PProbe) Log("direct transport: stockLayout=%d", g_stockTransport);
-  StartLocalBus();
+  if (g_harness) StartLocalBus();
   PatchImports();
+  if (g_production) {
+    HANDLE productionPatches = CreateThread(nullptr, 0, ProductionPatchThread, nullptr, 0, nullptr);
+    if (productionPatches) CloseHandle(productionPatches);
+  }
     if (g_harness) {
       if (g_directP2PProbe && !g_stockTransport) {
         BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));

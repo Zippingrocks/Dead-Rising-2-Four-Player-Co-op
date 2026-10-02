@@ -59,12 +59,13 @@ force their windows hidden, reject focus requests and suppress Win32 error dialo
 IXAudio2 mastering voice and its separate Bink volume setter inside each child; it does not change persisted Windows
 mixer state. Multi-instance tests may run alongside other desktop work only with this background profile active.
 
-## Phase 1: menu button (small; can go in early)
+## Phase 1: mod-only matchmaking (implemented; live Steam validation pending)
 
-- "Enable 4-Player Co-op" in DR2's main menu and in Case Zero's, built the same way as the CASE: ZERO button.
-  - `tools/build-case-zero-launcher.mjs`: new action hash, handled in the runtime's frontend hook.
-  - It toggles a setting in the runtime ini.
-- Placement: inside the Join Co-op submenu.
+- Installing `four_player_coop.ini` enables four-player mode without changing DR2's menus.
+- Searches require the exact Steam lobby metadata `dr2_4p_protocol=1`.
+- Hosts advertise that protocol and a four-member limit. Every modded member publishes the protocol on its lobby-member
+  record; outgoing joins and the host's native incoming admission reject missing or different protocol values.
+- Increment the protocol value whenever a release changes network-visible behavior incompatibly.
 
 ## Phase 2: 4 players in vanilla story co-op
 
@@ -88,4 +89,5 @@ mixer state. Multi-instance tests may run alongside other desktop work only with
   - Steam's single-instance guard;
   - GFWL/Steam sign-in;
   - the game's mutex/window checks.
-- **Menu button:** "Enable 4-Player Co-op" goes inside the Join Co-op submenu (next to Join Online Game / Join Friends), in both DR2 and Case Zero.
+- **Mode selection (superseded 2026-10-01):** there is no menu button. Installing the mod enables its isolated
+  four-player matchmaking pool; removing or disabling its dedicated ini restores unmodified DR2 behavior.

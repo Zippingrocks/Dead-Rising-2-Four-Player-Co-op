@@ -17,7 +17,11 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
   preserve Players 1/2, give Player 3 a full TIR suit, and give Player 4 a yellow TIR jacket; the four-instance
   visual test passed and all temporary content was restored.
 - Attributable four-owner combat, damage, KO/revive, complete partner HUD behavior, campaign-wide scripting,
-  production Steam sessions, and the solo/2P/4P selector remain unfinished.
+  and production Steam session validation remain unfinished.
+- The production runtime is now always four-player when `four_player_coop.ini` is installed. It adds the strict
+  `dr2_4p_protocol=1` Steam lobby filter, advertises the same tag on hosted lobbies, forces a four-member limit,
+  publishes it per member, and rejects incompatible outgoing or incoming joins. Vanilla menus are unchanged. Remote
+  Steam behavior still needs live validation.
 
 **Next target:** complete the formal combat and revive gate without regressing the proven transition/control path,
 then validate production Steam behavior and package the user-selectable mode. See

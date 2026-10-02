@@ -15,6 +15,7 @@
 !/4-player-coop/runtime/
 !/4-player-coop/tools/
 !/4-player-coop/docs/
+!/4-player-coop/package/
 
 /tools/*
 !/tools/case-zero-runtime/
