@@ -1,25 +1,27 @@
 # DR2 4-Player Co-op Campaign
 
-Current status (2026-09-27 audit): **experimental harness, not playable four-player campaign co-op**.
-Hidden hardware-rendered frontend loading, native lobby admission for four members, four-actor remote activation,
-and a two-member native state-transfer chain have been observed. Client-side listener startup plus native link-capacity
-setup before frontend JoinLobby resolved the rejected mesh handshakes in control `20260927_170127`. All four passed
-the mesh-connected gate and all three clients requested campaign transfer, but three instances then crashed with an
-access violation. Follow-up `171047` localized it to clothing allocation: all 13 clothing heap IDs for Players 3/4
-remain -1 despite valid actor objects. An opt-in candidate now adds separate backing storage and native lifecycle
-hooks, with passing offline tests. Follow-up `173745` completed with all four meshes connected, all 52 clothing
-heaps live in each process, and no crashes. All four reached safehouse level state, but remained on loading screens.
-Controls `174848` and `175723` repeated that crash-free result. The harness now accepts the native YES confirmation
-correctly, but Player 2 receives world data after its apply call and Players 3/4 have no pending data in final snapshots.
-Native-flow control `183105` now loads and renders both instances in the safehouse in the two-player configuration,
-with reciprocal co-op HUD markers and no crash. Four-player native-flow control `182227` still holds before entry.
-The watcher has corrected its game-active offset from +85 to instruction-validated +8D; earlier values are invalid.
-Header/recipient/cleanup control `191316` now delivers and natively applies campaign world data on all three
-remote clients. Final captures render the safehouse in all four instances, but all three clients have a lost-host
-dialog. This is a resolved data-transfer blocker, not stable four-player gameplay. The post-start
-disconnect/transition is now the step-3 blocker; step 4 is not ready. See
-`docs/world-transition-hold.md`. This is not yet a campaign pass. Replicated four-player campaign gameplay,
-remote Steam sessions, and the user-facing mode selector remain unverified/unimplemented. See `docs/current-state.md`.
+Source publication: [Dead-Rising-2-Four-Player-Co-op](https://github.com/Zippingrocks/Dead-Rising-2-Four-Player-Co-op).
+See [local publishing notes](docs/github-publishing.md) before syncing this active research workspace.
+
+Current status (2026-10-01): **experimental local gameplay, not a finished four-player mod**.
+Native four-member campaign entry now repeats successfully with all actor/clothing slots active and native meshes
+connected. Run `215228` passed isolated movement/convergence checks for all four owners; the host dropped a bat,
+Player 3 picked it up, and all four inventories agreed. This goes beyond lobby/allocated-actor evidence.
+
+Pause control `224611` passed all four initiators with the corrected acknowledgement/reply-order handling, then
+passed separate post-resume movement/convergence trials for all four owners. A two-player control passed both
+initiators. Private camera response and four physical Chucks in a room have since been observed, along with a normal
+bathroom door interaction and replicated host movement through it. Attack inputs reach native button records;
+damage is not yet established. Partner HUD widgets, combat, shared transitions, death/revive, production Steam
+sessions and the user-facing solo/two/four selector still require work. See `docs/current-state.md` and
+`docs/four-player-gameplay-validation.md` for precise passes, failures and acceptance gates. Do not equate
+loopback identities or a rendered room with release-ready multiplayer.
+
+Run `four_instance_20261001_141156` subsequently passed a native shared transition and separate post-load control
+for all four owners. Run `four_instance_20261001_175129` passed the independent visual-identity control: Players
+1/2 remained unchanged, Player 3 wore a full TIR suit, and Player 4 wore the yellow TIR jacket. The watched run
+remained stable until intentional shutdown and restored every temporarily staged archive. Formal attributable
+combat, KO/revive, complete HUD behavior, production Steam sessions, and release packaging remain open.
 
 Started 2026-09-24. Goal: 4-player co-op story campaigns for Dead Rising 2 PC (vanilla) and the Case Zero port, with a planned main-menu toggle preserving solo and two-player modes.
 
@@ -27,7 +29,7 @@ Four-process boot capacity and process-local Steam identity are proven on the de
 muted background clients remain alive together, each with a unique mutex, Steam ID, name and three-entry local friends
 list. The four processes also discover one another over a shared local session bus, with disposable per-instance
 save files on D: and no harness filename I/O sent to Steam Cloud. Ordered Steam P2P packet routing has passed a four-process ring test. This is not yet
-a playable four-player campaign; game-authored multiplayer save/load and replicated gameplay remain open. Synthetic
+a release-ready four-player campaign; full multiplayer save/load and comprehensive replicated gameplay remain open. Synthetic
 four-member lobby callbacks already pass. Static analysis also confirms vanilla's player attributes, human-actor slots,
 and `SinglePlayerToMultiPlayer` remote activation path are natively four-wide.
 
@@ -40,6 +42,9 @@ Development exception: `tools/test-four-instances.ps1 -StockSafehouseContent` te
 safehouse archives because the existing install still contains converted archives incompatible with the vanilla
 save fixture. Each run first preserves the installed files on D:, records both hash sets, and restores the exact
 pre-test set after its children stop. It refuses `-KeepRunning`; concurrent edits are preserved and reported.
+`-StockStreamedAssetsContent` additionally isolates the original global streamed-asset archive, after a vent
+transition exposed an older modified SawBlade entry with a failed compression checksum. Use both content flags
+for this install's vanilla gameplay/transition controls; neither permanently removes the port experiments.
 `-NetworkSnapshots` saves read-only native listener/mesh state alongside hidden captures. Neither flag changes the
 user's save or the Case Zero overlay. A connected lobby or completed mesh must never be presented as gameplay proof.
 

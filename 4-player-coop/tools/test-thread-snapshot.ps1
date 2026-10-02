@@ -1,14 +1,10 @@
-param(
-    [string]$VcVarsPath = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat'
-)
-
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $output = Join-Path $PSScriptRoot '..\builds\abi-tests'
 $output = (Resolve-Path -LiteralPath $output).Path
 $source = Join-Path $PSScriptRoot 'test_thread_snapshot_target.cpp'
 $exe = Join-Path $output 'test_thread_snapshot_target.exe'
-$vcvars = (Resolve-Path -LiteralPath $VcVarsPath).Path
+$vcvars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat'
 $command = 'call "{0}" >nul && cl.exe /nologo /std:c++17 /EHsc /W4 /WX "{1}" /Fo"{2}\\" /Fe"{3}"' -f $vcvars, $source, $output, $exe
 & $env:ComSpec /d /c $command
 if ($LASTEXITCODE -ne 0) { throw 'Snapshot target compilation failed' }

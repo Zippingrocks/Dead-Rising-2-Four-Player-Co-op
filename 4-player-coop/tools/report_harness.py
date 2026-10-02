@@ -4,11 +4,14 @@ import argparse
 import csv
 import json
 import hashlib
+import math
 from datetime import datetime
 from pathlib import Path
 import re
 
 from analyze_mesh_handshakes import analyze as analyze_mesh_handshakes
+from analyze_transition_stall import analyze as analyze_transition_stall
+from compare_campaign_combat import compare as compare_combat, load_samples as load_combat_samples
 
 
 ENDPOINT = re.compile(r"endpoint\[\d+\]=[0-9A-Fa-f]+ .*?peer=([0-9A-Fa-f]{16}) .*? state=(\d+)")
@@ -21,7 +24,7 @@ ACTOR_SLOT = re.compile(
     r"campaign actor\[(\d+)\]=(null|[0-9A-Fa-f]+)(?: user=(-?\d+) remoteEnabled=(\d+)"
     r"(?: vtable=(null|[0-9A-Fa-f]+) enableVirtual=(null|[0-9A-Fa-f]+))?)?"
 )
-FAULT = re.compile(r"(?:raised exception|snapshot fault|handoff exception|probe cancelled|signature mismatch|never became ready)")
+FAULT = re.compile(r"(?:raised exception|snapshot fault|handoff exception|probe cancelled|signature mismatch|never became ready|native desync assert:|jip broadcast queue: FAILED|pause acknowledgement: FAILED)")
 LOBBY_CANDIDATE = re.compile(
     r"lobby candidate #\d+ parsed gameMode=(-?\d+) ranked=(-?\d+) .*?expected gameMode=(-?\d+) ranked=(-?\d+)"
 )
@@ -93,13 +96,47 @@ def scan_native_flow(lines):
 def scan_native_teardown(lines):
     installed = False
     calls = []
+    quit_requests = []
+    shutdown_events = []
+    desync_asserts = []
+    shutdown_pattern = re.compile(
+        r'^(\d\d:\d\d:\d\d\.\d{3}) \[\d+\] native connection failure: client=([0-9A-Fa-f]{8}) '
+        r'recipient=([0-9A-Fa-f]{16}) flag=([01]) reason=(-?\d+)$'
+    )
+    assert_pattern = re.compile(
+        r'^(\d\d:\d\d:\d\d\.\d{3}) \[\d+\] native desync assert: caller=([0-9A-Fa-f]{8}) '
+        r'expression=(.{0,320}) file=(.{0,240}) line=(-?\d+) thread=(\d+)$'
+    )
+    quit_pattern = re.compile(
+        r'^(\d\d:\d\d:\d\d\.\d{3}) \[\d+\] native quit request: object=([0-9A-Fa-f]{8}) '
+        r'caller=([0-9A-Fa-f]{8}) reason=(-?\d+) stage=(-?\d+) previousReason=(-?\d+) '
+        r'deferredReason=(-?\d+) thread=(\d+)$'
+    )
     pattern = re.compile(
         r'^(\d\d:\d\d:\d\d\.\d{3}) \[\d+\] native teardown: call=(\d+) '
-        r'operation=(client-shutdown|p2p-shutdown|server-down-request|client-event-16|server-event-16) object=([0-9A-Fa-f]{8}) '
+        r'operation=(client-shutdown|p2p-shutdown|server-down-request|client-event-16|server-event-16|server-handle-quit) object=([0-9A-Fa-f]{8}) '
         r'caller=([0-9A-Fa-f]{8}) thread=(\d+) stackHints=([0-9A-Fa-f,]*)$'
     )
     for number, line in enumerate(lines, 1):
         installed |= 'native teardown: bounded PC client/P2P shutdown tracing installed;' in line
+        shutdown_match = shutdown_pattern.fullmatch(line.strip())
+        if shutdown_match and len(shutdown_events) < 32:
+            timestamp, client, recipient, flag, reason = shutdown_match.groups()
+            shutdown_events.append({'line': number, 'timestamp': timestamp, 'client': client.upper(),
+                                    'recipient': recipient.upper(), 'flag': int(flag), 'reason': int(reason)})
+        assert_match = assert_pattern.fullmatch(line.strip())
+        if assert_match and len(desync_asserts) < 32:
+            timestamp, caller, expression, file, source_line, thread = assert_match.groups()
+            desync_asserts.append({'line': number, 'timestamp': timestamp, 'caller': caller.upper(),
+                                  'expression': expression, 'file': file, 'source_line': int(source_line),
+                                  'thread': int(thread)})
+        quit_match = quit_pattern.fullmatch(line.strip())
+        if quit_match and len(quit_requests) < 32:
+            timestamp, address, caller, reason, stage, previous, deferred, thread = quit_match.groups()
+            quit_requests.append({'line': number, 'timestamp': timestamp, 'object': address.upper(),
+                                  'caller': caller.upper(), 'reason': int(reason), 'stage': int(stage),
+                                  'previous_reason': int(previous), 'deferred_reason': int(deferred),
+                                  'thread': int(thread)})
         match = pattern.fullmatch(line.strip())
         if not match or len(calls) >= 32:
             continue
@@ -110,7 +147,8 @@ def scan_native_teardown(lines):
         calls.append({'line': number, 'timestamp': timestamp, 'call': int(call), 'operation': operation,
                       'object': object_address.upper(), 'caller': caller.upper(), 'thread': int(thread),
                       'stack_address_hints': [frame.upper() for frame in frames]})
-    return {'installed': installed, 'calls': calls,
+    return {'installed': installed, 'calls': calls, 'quit_requests': quit_requests,
+            'shutdown_events': shutdown_events, 'desync_asserts': desync_asserts,
             'limitation': 'Bounded original-call observations; caller addresses and stack hints alone do not establish a disconnect cause or gameplay result.'}
 
 
@@ -274,6 +312,286 @@ def actor_activation_valid(result, instance, instances):
         slots[str(slot)].get('remote_enabled') == (0 if slot == instance else 1)
         for slot in range(instances)
     )
+
+
+def _parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _owned_movement_records(run, instances, pids):
+    records = []
+    acknowledged = []
+    errors = []
+    path = run / 'gameplay-input.jsonl'
+    if not path.is_file():
+        return records, errors
+    for number, line in enumerate(path.read_text(encoding='utf-8-sig').splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError) as error:
+            errors.append(f'gameplay input line {number}: {error}')
+            continue
+        instance = record.get('Instance')
+        samples = record.get('NativeInput') or []
+        ownership_valid = bool(samples) and all(
+            sample.get('local_user') == instance and sample.get('pid') == record.get('Pid') and
+            sample.get('actor') not in (None, '0x00000000', '0x0') and
+            sample.get('scene') not in (None, '0x00000000', '0x0')
+            for sample in samples
+        )
+        started = _parse_timestamp(record.get('StartedAt'))
+        finished = _parse_timestamp(record.get('UpAcknowledgedAt'))
+        base_valid = (isinstance(instance, int) and 0 <= instance < instances and
+                      record.get('Pid') == pids[instance] and record.get('Completed') is True and
+                      not record.get('Error') and record.get('ScanCode') in (17, 30, 31, 32) and
+                      started and finished and finished >= started)
+        if base_valid:
+            acknowledged.append({'instance': instance, 'start': started, 'end': finished})
+            if ownership_valid:
+                records.append({'instance': instance, 'start': started, 'end': finished,
+                                'source': 'native-input'})
+    for path in run.glob('navigation_*_p*.json'):
+        try:
+            navigation = json.loads(path.read_text(encoding='utf-8-sig'))
+            instance = navigation.get('Instance')
+            steps = navigation.get('Steps') or []
+            if (not isinstance(instance, int) or not 0 <= instance < instances or
+                    navigation.get('Pid') != pids[instance] or len(steps) < 2):
+                continue
+            times = []
+            for step in steps:
+                camera = step.get('camera') or {}
+                actor = camera.get('local_actor') or {}
+                captured = _parse_timestamp(camera.get('captured_at'))
+                if (camera.get('local_user') != instance or camera.get('pid') != pids[instance] or
+                        actor.get('user') != instance or actor.get('address') in (None, '0x00000000', '0x0') or
+                        camera.get('scene') in (None, '0x00000000', '0x0') or captured is None):
+                    raise ValueError('navigation ownership sample does not match harness child')
+                times.append(captured)
+            matching = [record for record in acknowledged if record['instance'] == instance and
+                        record['start'] >= min(times) and record['end'] <= max(times)]
+            if matching:
+                records.append({'instance': instance, 'start': min(record['start'] for record in matching),
+                                'end': max(record['end'] for record in matching),
+                                'source': path.name})
+        except (OSError, TypeError, ValueError, IndexError) as error:
+            errors.append(f'{path.name}: {error}')
+    return records, errors
+
+
+def _campaign_snapshot(path, instances, pids):
+    rows = json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(rows, list) or len(rows) != instances:
+        raise ValueError('observer count does not match harness instances')
+    times = []
+    positions = {}
+    for observer, row in enumerate(rows):
+        if row.get('pid') != pids[observer]:
+            raise ValueError(f'observer {observer} PID does not match harness child')
+        captured = _parse_timestamp(row.get('captured_at'))
+        if captured is None:
+            raise ValueError(f'observer {observer} has no valid timestamp')
+        times.append(captured)
+        actors = {actor.get('slot'): actor for actor in row.get('actors', [])}
+        if set(actors) != set(range(instances)):
+            raise ValueError(f'observer {observer} does not contain all player slots')
+        for slot, actor in actors.items():
+            position = actor.get('position')
+            if (not isinstance(position, list) or len(position) != 3 or actor.get('user') != slot or
+                    actor.get('remote_enabled') != (0 if slot == observer else 1) or
+                    actor.get('hidden') is not False or actor.get('render_hidden') is not False):
+                raise ValueError(f'observer {observer} slot {slot} is not an active visible actor')
+            positions[(observer, slot)] = tuple(float(value) for value in position)
+    return {'path': path.name, 'start': min(times), 'end': max(times), 'positions': positions}
+
+
+def _movement_evidence(before, after, instances, minimum, maximum=None):
+    distances = {}
+    replicated = []
+    for slot in range(instances):
+        slot_distances = []
+        for observer in range(instances):
+            first = before['positions'][(observer, slot)]
+            last = after['positions'][(observer, slot)]
+            distance = math.sqrt(sum((last[axis] - first[axis]) ** 2 for axis in range(3)))
+            distances[f'{observer}:{slot}'] = round(distance, 4)
+            slot_distances.append(distance)
+        if all(distance >= minimum and (maximum is None or distance <= maximum)
+               for distance in slot_distances):
+            replicated.append(slot)
+    return distances, replicated
+
+
+def _inputs_between(records, before, after, instances):
+    observed = {record['instance'] for record in records
+                if record['start'] >= before['end'] and record['end'] <= after['start']}
+    return sorted(observed), sorted(set(range(instances)) - observed)
+
+
+def analyze_local_control(run, instances, pids, movement_threshold=0.4):
+    """Correlate owned input with bounded movement replicated in every campaign view."""
+    evidence = {'verified': False, 'movement_threshold': movement_threshold, 'input_instances': [],
+                'missing_input_instances': list(range(instances)), 'before_snapshot': None,
+                'after_snapshot': None, 'replicated_slots': [], 'movement_by_observer': {},
+                'ignored_snapshots': [], 'errors': []}
+    if instances != 4 or len(pids) != instances or any(pid is None for pid in pids):
+        evidence['errors'].append('four harness child PIDs are required')
+        return evidence
+    records, errors = _owned_movement_records(run, instances, pids)
+    evidence['errors'].extend(errors)
+    snapshots = []
+    explicit = [run / 'local-control-before.json', run / 'local-control-after.json']
+    paths = explicit if all(path.is_file() for path in explicit) else list(run.glob('campaign-players.*.json'))
+    for path in paths:
+        try:
+            snapshots.append(_campaign_snapshot(path, instances, pids))
+        except (OSError, TypeError, ValueError, IndexError) as error:
+            evidence['ignored_snapshots'].append(f'{path.name}: {error}')
+    candidates = []
+    for before in snapshots:
+        for after in snapshots:
+            if before['end'] >= after['start']:
+                continue
+            observed, missing = _inputs_between(records, before, after, instances)
+            distances, replicated = _movement_evidence(before, after, instances, movement_threshold, 10.0)
+            candidates.append((not missing and replicated == list(range(instances)), len(replicated),
+                               after['start'] - before['end'], before, after, observed, missing,
+                               distances, replicated))
+    if not candidates:
+        evidence['errors'].append('campaign snapshots do not bracket four owned inputs')
+        return evidence
+    candidate = sorted(candidates, key=lambda item: (not item[0], -item[1], item[2]))[0]
+    verified, _, _, before, after, observed, missing, distances, replicated = candidate
+    evidence.update({'input_instances': observed, 'missing_input_instances': missing,
+                     'before_snapshot': before['path'], 'after_snapshot': after['path'],
+                     'replicated_slots': replicated, 'movement_by_observer': distances})
+    evidence['verified'] = verified and not evidence['errors']
+    return evidence
+
+
+def analyze_transition_control(run, instances, pids, movement_threshold=0.4):
+    evidence = {'verified': False, 'before_snapshot': 'transition-before.json',
+                'arrival_snapshot': 'transition-after-arrival.json',
+                'control_snapshot': 'transition-after-control.json', 'input_instances': [],
+                'missing_input_instances': list(range(instances)), 'transitioned_slots': [],
+                'controlled_slots': [], 'transition_distance_by_observer': {},
+                'movement_by_observer': {}, 'errors': []}
+    if instances != 4 or len(pids) != instances or any(pid is None for pid in pids):
+        evidence['errors'].append('four harness child PIDs are required')
+        return evidence
+    try:
+        before = _campaign_snapshot(run / evidence['before_snapshot'], instances, pids)
+        arrival = _campaign_snapshot(run / evidence['arrival_snapshot'], instances, pids)
+        controlled = _campaign_snapshot(run / evidence['control_snapshot'], instances, pids)
+    except (OSError, TypeError, ValueError, IndexError) as error:
+        evidence['errors'].append(str(error))
+        return evidence
+    records, errors = _owned_movement_records(run, instances, pids)
+    evidence['errors'].extend(errors)
+    observed, missing = _inputs_between(records, arrival, controlled, instances)
+    transition_distances, transitioned = _movement_evidence(before, arrival, instances, 20.0)
+    movement_distances, moved = _movement_evidence(arrival, controlled, instances, movement_threshold, 10.0)
+    evidence.update({'input_instances': observed, 'missing_input_instances': missing,
+                     'transitioned_slots': transitioned, 'controlled_slots': moved,
+                     'transition_distance_by_observer': transition_distances,
+                     'movement_by_observer': movement_distances})
+    evidence['verified'] = (not evidence['errors'] and not missing and
+                            transitioned == list(range(instances)) and moved == list(range(instances)))
+    return evidence
+
+
+def _combat_snapshot_window(path, pids):
+    samples = load_combat_samples(path, pids)
+    times = []
+    for sample in samples.values():
+        captured = datetime.fromisoformat(sample['captured_at'])
+        if captured.tzinfo is None:
+            raise ValueError(f'{path.name}: combat timestamp lacks timezone')
+        times.append(captured)
+    if (max(times) - min(times)).total_seconds() > 5:
+        raise ValueError(f'{path.name}: combat samples are not synchronized')
+    return {'path': path, 'start': min(times), 'end': max(times)}
+
+
+def _owned_action_instances(run, before, after, pids, predicate):
+    observed = set()
+    path = run / 'gameplay-input.jsonl'
+    if not path.is_file():
+        return []
+    for line in path.read_text(encoding='utf-8-sig', errors='replace').splitlines():
+        try:
+            record = json.loads(line)
+            instance = record['Instance']
+            start = datetime.fromisoformat(record['StartedAt'])
+            end = datetime.fromisoformat(record['UpAcknowledgedAt'])
+            native = record.get('NativeInput', [])
+            owned = any(sample.get('local_user') == instance and sample.get('pid') == pids[instance]
+                        for sample in native)
+            if (record.get('Completed') is True and not record.get('Error') and owned and
+                    record.get('Pid') == pids[instance] and before['end'] <= start and
+                    end <= after['start'] and predicate(record)):
+                observed.add(instance)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError):
+            continue
+    return sorted(observed)
+
+
+def analyze_phase2_combat(run, instances, pids):
+    """Require attributable kills, replicated damage, KO, and an owned teammate revive."""
+    evidence = {'verified': False, 'kill_slots': [], 'kill_attack_instances': {},
+                'damaged_slots': [], 'ko_slots': [], 'revived_slots': [],
+                'revive_interact_instances': [], 'checkpoints': {}, 'errors': []}
+    if instances != 4 or len(pids) != instances or any(pid is None for pid in pids):
+        evidence['errors'].append('four harness child PIDs are required')
+        return evidence
+    names = ['phase2-baseline'] + [f'phase2-after-player-{slot + 1}-kill' for slot in range(4)]
+    names += ['phase2-damage-before', 'phase2-damage-after', 'phase2-ko', 'phase2-revived']
+    windows = {}
+    for name in names:
+        path = run / f'combat-{name}.json'
+        evidence['checkpoints'][name] = path.name
+        try:
+            windows[name] = _combat_snapshot_window(path, pids)
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            evidence['errors'].append(str(error))
+    if evidence['errors']:
+        return evidence
+    previous = windows['phase2-baseline']
+    for slot in range(4):
+        current = windows[f'phase2-after-player-{slot + 1}-kill']
+        result = compare_combat(previous['path'], current['path'], pids)
+        attacks = _owned_action_instances(
+            run, previous, current, pids,
+            lambda record: bool(record.get('Mouse', {}).get('Buttons', 0) & 1))
+        evidence['kill_attack_instances'][str(slot)] = attacks
+        if result['kill_attributed_slots'] == [slot] and slot in attacks:
+            evidence['kill_slots'].append(slot)
+        previous = current
+    damage_before = windows['phase2-damage-before']
+    damage_after = windows['phase2-damage-after']
+    damage = compare_combat(damage_before['path'], damage_after['path'], pids)
+    evidence['damaged_slots'] = damage['damaged_slots']
+    ko = compare_combat(damage_after['path'], windows['phase2-ko']['path'], pids)
+    evidence['ko_slots'] = ko['ko_slots']
+    revived = compare_combat(windows['phase2-ko']['path'], windows['phase2-revived']['path'], pids)
+    evidence['revived_slots'] = revived['revived_slots']
+    evidence['revive_interact_instances'] = _owned_action_instances(
+        run, windows['phase2-ko'], windows['phase2-revived'], pids,
+        lambda record: record.get('ScanCode') == 18)
+    matching_revival = sorted(set(evidence['ko_slots']).intersection(evidence['revived_slots']))
+    teammate_revive = any(instance not in matching_revival
+                          for instance in evidence['revive_interact_instances'])
+    evidence['verified'] = (evidence['kill_slots'] == [0, 1, 2, 3] and
+                            bool(evidence['damaged_slots']) and bool(matching_revival) and
+                            teammate_revive)
+    return evidence
 
 
 def latest_mesh_snapshot(run, instance, pid):
@@ -445,6 +763,12 @@ def summarize(run, instances):
         outcome.get('Configuration', {}).get('ActorActivationProbe') and
         all(actor_activation_valid(result, instance, instances) for instance, result in enumerate(results))
     )
+    process_rows = (outcome or {}).get('Processes', [])
+    pids = [row.get('Pid') for row in process_rows[:instances]]
+    local_control = analyze_local_control(run, instances, pids)
+    transition_control = analyze_transition_control(run, instances, pids)
+    phase2_combat = analyze_phase2_combat(run, instances, pids)
+    transition_stall = analyze_transition_stall(run)
     missing_lobby_join_instances = [result['instance'] for result in results[1:]
                                     if not result['lobby_join_requested']]
     lobby_logic_join_verified = bool(
@@ -470,7 +794,16 @@ def summarize(run, instances):
             "missing_lobby_join_instances": missing_lobby_join_instances,
             "lobby_frontend_join_verified": lobby_join_verified,
             "four_player_actor_activation_verified": actor_activation_verified,
-            "four_player_campaign_verified": False}
+            "four_player_local_control_verified": actor_activation_verified and local_control['verified'],
+            "four_player_local_control_evidence": local_control,
+            "four_player_post_transition_control_verified": actor_activation_verified and transition_control['verified'],
+            "four_player_post_transition_control_evidence": transition_control,
+            "four_player_phase2_combat_verified": actor_activation_verified and phase2_combat['verified'],
+            "four_player_phase2_combat_evidence": phase2_combat,
+            "transition_stall_analysis": transition_stall,
+            "four_player_campaign_verified": actor_activation_verified and local_control['verified'] and transition_control['verified'],
+            "four_player_campaign_combat_verified": (actor_activation_verified and local_control['verified'] and
+                                                       transition_control['verified'] and phase2_combat['verified'])}
 
 
 def main():

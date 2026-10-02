@@ -23,6 +23,9 @@
 #include "clothing_heap_owner.h"
 #include "clothing_capacity_thunks.h"
 #include "nfs_request_owner.h"
+#include "jip_broadcast_queue.h"
+#include "pause_acknowledgement.h"
+#include "harness_cursor.h"
 
 namespace coop_clothing {
 Owners g_owners;
@@ -57,9 +60,22 @@ bool g_clientTransitionProbe = false;
 bool g_hostStateTransferProbe = false;
 bool g_nativeFlowProbe = false;
 bool g_nfsOwnershipProbe = false;
+bool g_jipBroadcastQueueProbe = false;
+bool g_pauseAcknowledgementProbe = false;
+bool g_loaderWaitProbe = false;
+bool g_privateInputProbe = false;
 bool g_lobbyFrontendProbe = false;
 bool g_meshListenerProbe = false;
 bool g_clothingCapacityProbe = false;
+bool g_clothingVariantsProbe = false;
+volatile LONG g_clothingVariantState = 0;
+void* volatile g_clothingVariantManager = nullptr;
+void* volatile g_clothingVariantActors[4]{};
+volatile LONG64 g_clothingVariantCandidate = 0;
+volatile LONG64 g_clothingVariantApplied = 0;
+DWORD g_clothingVariantCandidateSince = 0;
+volatile LONG g_clothingVariantApplyCount = 0;
+DWORD g_clothingVariantFirstAppliedAt = 0;
 volatile LONG g_campaignActivationState = 0;
 BYTE* volatile g_campaignActivationP2P = nullptr;
 volatile LONG g_connectionMeshInitState = 0;
@@ -157,7 +173,85 @@ LocalServerAcceptFn g_localServerAccept = nullptr;
 using CanListenFn = bool(__thiscall*)(void*, const unsigned long long*, const unsigned long long*, const unsigned short*);
 CanListenFn g_canListen = nullptr;
 bool InstallJoinPolicyTrace(BYTE* base);
+volatile LONG g_lobbyFrontendObserverStarted = 0;
+bool StartLobbyFrontendObserver();
 void Log(const char* format, ...);
+bool WriteSlot(void* address, const void* bytes, size_t size);
+
+void __cdecl TraceLoaderWaitTick(void** returnSlot, BYTE* scheduler) {
+  static volatile LONG calls = 0;
+  static volatile LONG lastLogTick = 0;
+  const LONG call = InterlockedIncrement(&calls);
+  const DWORD now = GetTickCount();
+  const LONG previous = InterlockedCompareExchange(&lastLogTick, 0, 0);
+  if (call > 2 && static_cast<DWORD>(now - previous) < 1000) return;
+  InterlockedExchange(&lastLogTick, static_cast<LONG>(now));
+
+  BYTE* event = nullptr;
+  BYTE complete = 0xFF;
+  DWORD event0 = 0, event4 = 0, event8 = 0, eventC = 0;
+  DWORD ownerThread = 0;
+  LONG schedulerState = -1, pending = -1;
+  __try {
+    BYTE* callerStack = reinterpret_cast<BYTE*>(returnSlot) + sizeof(void*);
+    event = *reinterpret_cast<BYTE**>(callerStack + 0x1C);
+    if (event) {
+      event0 = *reinterpret_cast<DWORD*>(event);
+      event4 = *reinterpret_cast<DWORD*>(event + 4);
+      event8 = *reinterpret_cast<DWORD*>(event + 8);
+      eventC = *reinterpret_cast<DWORD*>(event + 0xC);
+      complete = event[0x10];
+    }
+    if (scheduler) {
+      ownerThread = *reinterpret_cast<DWORD*>(scheduler + 8);
+      schedulerState = *reinterpret_cast<LONG*>(scheduler + 0xC);
+      pending = *reinterpret_cast<LONG*>(scheduler + 0x4C);
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    event = nullptr;
+    complete = 0xFF;
+  }
+  Log("loader wait: tick=%ld site=%p scheduler=%p ownerThread=%lu schedulerState=%ld pending=%ld "
+      "event=%p complete=%u eventWords=%08lX,%08lX,%08lX,%08lX thread=%lu",
+      call, returnSlot ? *returnSlot : nullptr, scheduler, ownerThread, schedulerState, pending,
+      event, complete, event0, event4, event8, eventC, GetCurrentThreadId());
+}
+
+__declspec(naked) void LoaderWaitTickThunk() {
+  __asm {
+    mov eax, esp
+    push esi
+    push eax
+    call TraceLoaderWaitTick
+    add esp, 8
+    mov eax, 0x009A68E0
+    call eax
+    ret
+  }
+}
+
+bool InstallLoaderWaitTrace(BYTE* base) {
+  if (!g_loaderWaitProbe) return true;
+  if (base != reinterpret_cast<BYTE*>(0x00400000)) return false;
+  const DWORD site = 0x009E7D58;
+  BYTE expected[5]{0xE8};
+  const LONG originalOffset = static_cast<LONG>(0x009A68E0 - (site + 5));
+  memcpy(expected + 1, &originalOffset, 4);
+  if (memcmp(reinterpret_cast<void*>(site), expected, sizeof(expected))) {
+    Log("loader wait: signature mismatch at %08lX; trace cancelled", site);
+    return false;
+  }
+  BYTE replacement[5]{0xE8};
+  const LONG hookOffset = static_cast<LONG>(reinterpret_cast<DWORD>(&LoaderWaitTickThunk) - (site + 5));
+  memcpy(replacement + 1, &hookOffset, 4);
+  if (!WriteSlot(reinterpret_cast<void*>(site), replacement, sizeof(replacement))) {
+    Log("loader wait: patch write failed; trace cancelled");
+    return false;
+  }
+  FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), sizeof(replacement));
+  Log("loader wait: read-only completion/queue trace installed at %08lX", site);
+  return true;
+}
 
 void __fastcall Hook_OnlineUpdate(void* online, void*, float deltaSeconds) {
   const DWORD thread = GetCurrentThreadId();
@@ -403,6 +497,245 @@ bool InstallClothingCapacityProbe(BYTE* base) {
   return true;
 }
 
+LONG64 ClothingVariantSignature(void* manager, void* const* actors) {
+  unsigned long long value = reinterpret_cast<ULONG_PTR>(manager);
+  for (int player = 0; player < 4; ++player)
+    value ^= static_cast<unsigned long long>(reinterpret_cast<ULONG_PTR>(actors[player])) << (player * 11);
+  return static_cast<LONG64>(value);
+}
+
+bool ReadClothingVariantTargets(void*& manager, void** actors) {
+  manager = nullptr;
+  memset(actors, 0, sizeof(void*) * 4);
+  if (!g_clothingVariantsProbe || g_requestedPlayers != 4) return false;
+  __try {
+    void* game = *reinterpret_cast<void**>(0x00DCB0FC);
+    if (!game) return false;
+    auto* clothing = *reinterpret_cast<BYTE**>(static_cast<BYTE*>(game) + 0x7EB8);
+    if (!clothing || *reinterpret_cast<int*>(clothing + 0x08) != 2 ||
+        *reinterpret_cast<int*>(clothing + 0x3DC4) != 4 ||
+        *reinterpret_cast<int*>(clothing + 0x3DEC) != 0 ||
+        *reinterpret_cast<int*>(clothing + 0x3CD8) != 0) return false;
+    for (int player = 0; player < 4; ++player) {
+      actors[player] = *reinterpret_cast<void**>(clothing + 0x3CDC + player * 4);
+      if (!actors[player]) return false;
+    }
+    manager = clothing;
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    manager = nullptr;
+    memset(actors, 0, sizeof(void*) * 4);
+    return false;
+  }
+}
+
+bool ClothingVariantsPendingInternal() {
+  // Every client fixes its local view of actor slot 4. P1-P3 are never wardrobe targets.
+  if (!g_clothingVariantsProbe ||
+      InterlockedCompareExchange(&g_clothingVariantState, 0, 0) == 3) return false;
+  if (InterlockedCompareExchange(&g_clothingVariantState, 0, 0) == 1) return true;
+  void* manager = nullptr;
+  void* actors[4]{};
+  if (!ReadClothingVariantTargets(manager, actors)) return false;
+  const LONG64 signature = ClothingVariantSignature(manager, actors);
+  const DWORD now = GetTickCount();
+  if (signature == InterlockedCompareExchange64(&g_clothingVariantApplied, 0, 0)) {
+    const LONG applyCount = InterlockedCompareExchange(&g_clothingVariantApplyCount, 0, 0);
+    // The final native admission synchronizes P4's stock chest after the first local request.
+    // Reapply actor slot 4 once the observed sync window has passed; P1-P3 remain untouched.
+    if (applyCount != 1 ||
+        static_cast<DWORD>(now - g_clothingVariantFirstAppliedAt) < 60000) return false;
+    Log("clothing variants: scheduling post-admission P4 jacket reapply");
+    InterlockedExchange64(&g_clothingVariantApplied, 0);
+    InterlockedExchange64(&g_clothingVariantCandidate, 0);
+    g_clothingVariantCandidateSince = now;
+    return false;
+  }
+  if (signature != InterlockedCompareExchange64(&g_clothingVariantCandidate, 0, 0)) {
+    InterlockedExchange64(&g_clothingVariantCandidate, signature);
+    g_clothingVariantCandidateSince = now;
+    return false;
+  }
+  if (now - g_clothingVariantCandidateSince < 1000) return false;
+  g_clothingVariantManager = manager;
+  for (int player = 0; player < 4; ++player) g_clothingVariantActors[player] = actors[player];
+  MemoryBarrier();
+  return InterlockedCompareExchange(&g_clothingVariantState, 1, 0) == 0;
+}
+
+void ApplyClothingVariantsOnCurrentThreadInternal() {
+  if (InterlockedCompareExchange(&g_clothingVariantState, 2, 1) != 1) return;
+  void* manager = nullptr;
+  void* actors[4]{};
+  if (!ReadClothingVariantTargets(manager, actors) || manager != g_clothingVariantManager) {
+    InterlockedExchange(&g_clothingVariantState, 0);
+    return;
+  }
+  for (int player = 0; player < 4; ++player) {
+    if (actors[player] != g_clothingVariantActors[player]) {
+      InterlockedExchange(&g_clothingVariantState, 0);
+      return;
+    }
+  }
+  const BYTE lookupExpected[] = {0x8B, 0x44, 0x24, 0x04, 0x3D, 0xBE, 0x00, 0x00,
+                                 0x00, 0x77, 0x10, 0x69, 0xC0, 0x1C, 0x01, 0x00};
+  const BYTE localSetExpected[] = {0x33, 0xC0, 0x83, 0x79, 0x08, 0x02, 0x56, 0x75,
+                                   0x1B, 0x8B, 0x74, 0x24, 0x08, 0x8D, 0x91, 0xDC,
+                                   0x3C, 0x00, 0x00};
+  auto* lookupFunction = reinterpret_cast<BYTE*>(0x0041FEF0);
+  auto* localSetFunction = reinterpret_cast<BYTE*>(0x0051C9D0);
+  if (memcmp(lookupFunction, lookupExpected, sizeof(lookupExpected)) != 0 ||
+      memcmp(localSetFunction, localSetExpected, sizeof(localSetExpected)) != 0) {
+    Log("clothing variants: actor-local clothing signatures mismatch; feature disabled");
+    InterlockedExchange(&g_clothingVariantState, 3);
+    return;
+  }
+  using LookupOutfitFn = BYTE* (__thiscall*)(void*, unsigned);
+  using SetClothingInfoFn = void (__thiscall*)(void*, void*, int, const char*, bool);
+  auto lookupOutfit = reinterpret_cast<LookupOutfitFn>(lookupFunction);
+  auto setClothingInfo = reinterpret_cast<SetClothingInfoFn>(localSetFunction);
+  const LONG64 signature = ClothingVariantSignature(manager, actors);
+  struct LocalOutfitTarget {
+    int actor;
+    unsigned outfit;
+    int part;
+  };
+  // P3 gets the native TIR helmet, one-piece torso/legs, gloves and boots. P4 keeps only its yellow chest.
+  const LocalOutfitTarget targets[] = {
+      {2, 5u, 0}, {2, 5u, 3}, {2, 5u, 4}, {2, 5u, 5}, {2, 5u, 6},
+      {3, 151u, 3},
+  };
+  Log("clothing variants: applying actor-local P3 TIR suit and P4 yellow jacket manager=%p thread=%lu",
+      manager, GetCurrentThreadId());
+  __try {
+    void* outfitDatabase = *reinterpret_cast<void**>(static_cast<BYTE*>(manager) + 0x3CEC);
+    for (const auto& target : targets) {
+      BYTE* outfitEntry = outfitDatabase ? lookupOutfit(outfitDatabase, target.outfit) : nullptr;
+      BYTE* partName = outfitEntry ? outfitEntry + target.part * 36 + 0x1C : nullptr;
+      if (!partName) {
+        Log("clothing variants: P%d outfit=%u part=%d lookup failed; feature disabled",
+            target.actor + 1, target.outfit, target.part);
+        InterlockedExchange(&g_clothingVariantState, 3);
+        return;
+      }
+      if (*(partName + 0x20) >= 0x1F) partName = *reinterpret_cast<BYTE**>(partName);
+      if (!partName || !*partName) {
+        Log("clothing variants: P%d outfit=%u part=%d asset is empty; feature disabled",
+            target.actor + 1, target.outfit, target.part);
+        InterlockedExchange(&g_clothingVariantState, 3);
+        return;
+      }
+      // SetClothingInfo resolves the selected actor to its own slot and never creates a broadcast outfit event.
+      setClothingInfo(manager, actors[target.actor], target.part,
+                      reinterpret_cast<const char*>(partName), false);
+      Log("clothing variants: actor-local P%d outfit=%u part=%d asset=%s",
+          target.actor + 1, target.outfit, target.part, reinterpret_cast<const char*>(partName));
+    }
+    if (InterlockedCompareExchange(&g_clothingVariantApplyCount, 0, 0) == 0)
+      g_clothingVariantFirstAppliedAt = GetTickCount();
+    const LONG applyCount = InterlockedIncrement(&g_clothingVariantApplyCount);
+    InterlockedExchange64(&g_clothingVariantApplied, signature);
+    Log("clothing variants: actor-local wardrobe requests queued successfully pass=%ld", applyCount);
+    InterlockedExchange(&g_clothingVariantState, 0);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("clothing variants: native jacket request fault=%08lX; feature disabled", GetExceptionCode());
+    InterlockedExchange(&g_clothingVariantState, 3);
+  }
+}
+
+SRWLOCK g_jipQueueLock = SRWLOCK_INIT;
+coop_jip::BroadcastQueue<256> g_jipQueue;
+BYTE* g_jipQueueGame = nullptr;
+BYTE* g_jipQueueScene = nullptr;
+BYTE* g_jipQueueClient = nullptr;
+bool g_jipQueueDraining = false;
+volatile LONG g_jipApplyDepth = 0;
+
+BYTE* NativeP2PClient() {
+  BYTE* online = *reinterpret_cast<BYTE**>(0x00E5F428);
+  BYTE* p2p = online ? *reinterpret_cast<BYTE**>(online + 0xD8) : nullptr;
+  return p2p ? *reinterpret_cast<BYTE**>(p2p + 0x38) : nullptr;
+}
+
+__declspec(noreturn) void FailJipQueue(const char* reason) {
+  Log("jip broadcast queue: FAILED reason=%s; aborting owned harness child without discarding active events", reason);
+  TerminateProcess(GetCurrentProcess(), 0xE043C005);
+  ExitProcess(0xE043C005);
+}
+
+void ResetJipQueue() {
+  AcquireSRWLockExclusive(&g_jipQueueLock);
+  const unsigned count = g_jipQueue.Count();
+  g_jipQueue.Clear();
+  g_jipQueueGame = g_jipQueueScene = g_jipQueueClient = nullptr;
+  g_jipQueueDraining = false;
+  ReleaseSRWLockExclusive(&g_jipQueueLock);
+  if (count) Log("jip broadcast queue: native disconnect invalidated %u pending events", count);
+}
+
+void __fastcall ReceiveJipBroadcast(void* object, void*, uint32_t* event, const void* data,
+                                   int type, int size, int direction) {
+  using Fn = void (__thiscall*)(void*, uint32_t*, const void*, int, int, int);
+  if (!g_jipBroadcastQueueProbe || g_instance == 0 || direction != 1) {
+    reinterpret_cast<Fn>(0x007B7890)(object, event, data, type, size, direction);
+    return;
+  }
+  BYTE* client = NativeP2PClient();
+  BYTE* game = static_cast<BYTE*>(object);
+  BYTE* scene = *reinterpret_cast<BYTE**>(game + 0x2C);
+  const LONG state = client ? *reinterpret_cast<LONG*>(client + 0x3F4) : 0;
+  AcquireSRWLockExclusive(&g_jipQueueLock);
+  const bool pending = g_jipQueue.Count() || g_jipQueueDraining;
+  const bool defer = pending || state == 1 || state == 2 || InterlockedCompareExchange(&g_jipApplyDepth, 0, 0);
+  const bool sameOwner = !pending || (g_jipQueueGame == game && g_jipQueueScene == scene && g_jipQueueClient == client);
+  bool stored = false;
+  if (defer && sameOwner && client && scene) {
+    stored = g_jipQueue.Push(event, data, type, size);
+    if (stored) { g_jipQueueGame = game; g_jipQueueScene = scene; g_jipQueueClient = client; }
+  }
+  const unsigned count = g_jipQueue.Count();
+  ReleaseSRWLockExclusive(&g_jipQueueLock);
+  if (defer) {
+    if (!stored) FailJipQueue(sameOwner ? "invalid event or queue capacity" : "game/scene/client changed");
+    if (count <= 16) Log("jip broadcast queue: retained type=%d size=%d sequence=%lu state=%ld count=%u thread=%lu",
+                        type, size, event[0], state, count, GetCurrentThreadId());
+    return;
+  }
+  reinterpret_cast<Fn>(0x007B7890)(object, event, data, type, size, direction);
+}
+
+void DrainJipQueue(BYTE* client) {
+  if (!g_jipBroadcastQueueProbe || g_instance == 0) return;
+  BYTE* node = *reinterpret_cast<BYTE**>(client + 0x90);
+  BYTE* mesh = *reinterpret_cast<BYTE**>(0x00DDEA04);
+  if (*reinterpret_cast<LONG*>(client + 0x3F4) != 0 || *reinterpret_cast<LONG*>(client + 0x88) != 2 ||
+      !node || *reinterpret_cast<LONG*>(node + 0xC) != 3 || !mesh || *reinterpret_cast<LONG*>(mesh + 0x3C) != 3) return;
+  AcquireSRWLockExclusive(&g_jipQueueLock);
+  if (g_jipQueueDraining || !g_jipQueue.Count()) { ReleaseSRWLockExclusive(&g_jipQueueLock); return; }
+  g_jipQueueDraining = true;
+  ReleaseSRWLockExclusive(&g_jipQueueLock);
+  unsigned delivered = 0;
+  for (;;) {
+    coop_jip::Broadcast event;
+    AcquireSRWLockExclusive(&g_jipQueueLock);
+    BYTE* game = g_jipQueueGame;
+    const bool sameOwner = g_jipQueueClient == client && game == *reinterpret_cast<BYTE**>(0x00DDC3F0) &&
+        game && g_jipQueueScene == *reinterpret_cast<BYTE**>(game + 0x2C);
+    if (!g_jipQueue.Count()) {
+      g_jipQueueDraining = false;
+      ReleaseSRWLockExclusive(&g_jipQueueLock);
+      break;
+    }
+    if (!sameOwner) { ReleaseSRWLockExclusive(&g_jipQueueLock); FailJipQueue("owner changed before replay"); }
+    g_jipQueue.Pop(event);
+    ReleaseSRWLockExclusive(&g_jipQueueLock);
+    reinterpret_cast<void (__thiscall*)(void*, uint32_t*, const void*, int, int, int)>(0x007B7890)(
+        game, event.header, event.payload, event.type, event.size, 1);
+    ++delivered;
+  }
+  Log("jip broadcast queue: replayed=%u after native world application thread=%lu", delivered, GetCurrentThreadId());
+}
+
 void __fastcall TraceNativeWorldApply(void* object, void*) {
   static LONG calls = 0;
   const LONG call = InterlockedIncrement(&calls);
@@ -411,7 +744,13 @@ void __fastcall TraceNativeWorldApply(void* object, void*) {
     Log("native transition: world apply enter call=%ld client=%p jipState=%ld bytes=%ld data=%p thread=%lu", call, client,
         *reinterpret_cast<LONG*>(client + 0x3F4), *reinterpret_cast<LONG*>(client + 0x3F8),
         *reinterpret_cast<void**>(client + 0x3FC), GetCurrentThreadId());
-  reinterpret_cast<void (__thiscall*)(void*)>(0x0088A180)(client);
+  if (g_jipBroadcastQueueProbe) InterlockedIncrement(&g_jipApplyDepth);
+  __try {
+    reinterpret_cast<void (__thiscall*)(void*)>(0x0088A180)(client);
+  } __finally {
+    if (g_jipBroadcastQueueProbe) InterlockedDecrement(&g_jipApplyDepth);
+  }
+  DrainJipQueue(client);
   if (call <= 16)
     Log("native transition: world apply return call=%ld jipState=%ld flag94=%u started=%u transfer=%u", call,
         *reinterpret_cast<LONG*>(client + 0x3F4), client[0x94], client[0x251], client[0x97]);
@@ -582,6 +921,7 @@ void LogNativeTeardown(const char* operation, void* object, void* caller) {
 
 __declspec(noinline) void __fastcall TraceNativeClientShutdown(void* object, void*) {
   LogNativeTeardown("client-shutdown", object, _ReturnAddress());
+  if (g_jipBroadcastQueueProbe) ResetJipQueue();
   reinterpret_cast<void (__thiscall*)(void*)>(0x0087C550)(object);
 }
 
@@ -595,16 +935,158 @@ __declspec(noinline) void __fastcall TraceNativeServerDown(void* object, void*) 
   reinterpret_cast<void (__thiscall*)(void*)>(0x00873BE0)(object);
 }
 
+__declspec(noinline) void __fastcall TraceNativeServerQuit(void* object, void*) {
+  LogNativeTeardown("server-handle-quit", object, _ReturnAddress());
+  reinterpret_cast<void (__thiscall*)(void*)>(0x00861A40)(object);
+}
+
+void LogTopologyEvent(const BYTE* event) {
+  static LONG calls = 0;
+  if (InterlockedIncrement(&calls) > 32) return;
+  Log("native teardown event: event=%p vtable=%08lX recipient=%08lX kind=%lu source=%p detail=%08lX",
+      event, *reinterpret_cast<const DWORD*>(event), *reinterpret_cast<const DWORD*>(event + 0x18),
+      *reinterpret_cast<const DWORD*>(event + 0x1C), *reinterpret_cast<void* const*>(event + 0x20),
+      *reinterpret_cast<const DWORD*>(event + 0x24));
+}
+
+struct NativeDispatchContext { void* client; DWORD category; LONG topologyKind; };
+__declspec(thread) const NativeDispatchContext* g_nativeDispatchContext = nullptr;
+__declspec(thread) LONG g_inventoryWireItem = -2;
+
+void LogInventoryHandoff(const char* operation, const BYTE* payload, const BYTE* scene, LONG itemId) {
+  static LONG calls = 0;
+  if (InterlockedIncrement(&calls) > 96) return;
+  const BYTE* actor = *reinterpret_cast<BYTE* const*>(payload + 0x10);
+  const BYTE* prop = *reinterpret_cast<BYTE* const*>(payload + 0x14);
+  const BYTE* online = *reinterpret_cast<BYTE**>(0x00E5F428);
+  const BYTE* p2p = online ? *reinterpret_cast<BYTE* const*>(online + 0xD8) : nullptr;
+  const BYTE* client = p2p ? *reinterpret_cast<BYTE* const*>(p2p + 0x38) : nullptr;
+  Log("inventory handoff: operation=%s actor=%p user=%ld itemId=%08lX prop=%p localUser=%ld sender=%lu jipState=%ld started=%u transfer=%u",
+      operation, actor, actor ? *reinterpret_cast<const LONG*>(actor + 0x3A0) : -1, itemId, prop,
+      scene ? *reinterpret_cast<const LONG*>(scene + 0x98) : -1,
+      (*reinterpret_cast<const DWORD*>(payload + 0xC) >> 6) & 3,
+      client ? *reinterpret_cast<const LONG*>(client + 0x3F4) : -1,
+      client ? client[0x251] : 0, client ? client[0x97] : 0);
+}
+
+int __fastcall TraceInventoryItemRead(void* message, void*) {
+  const int result = reinterpret_cast<int (__thiscall*)(void*)>(0x00A4FA00)(message);
+  g_inventoryWireItem = result;
+  return result;
+}
+
+void __fastcall TraceInventoryItemUnpack(void* object, void*, const BYTE* scene, void* message) {
+  const LONG previous = g_inventoryWireItem;
+  g_inventoryWireItem = -2;
+  __try {
+    reinterpret_cast<void (__thiscall*)(void*, const BYTE*, void*)>(0x007A8B00)(object, scene, message);
+    LogInventoryHandoff("unpack", static_cast<const BYTE*>(object), scene, g_inventoryWireItem);
+  } __finally {
+    g_inventoryWireItem = previous;
+  }
+}
+
+void __fastcall TraceInventoryItemPack(void* object, void*, const BYTE* scene, void* message) {
+  const BYTE* payload = static_cast<const BYTE*>(object);
+  const BYTE* prop = *reinterpret_cast<BYTE* const*>(payload + 0x14);
+  const BYTE* properties = prop ? *reinterpret_cast<BYTE* const*>(prop + 0xAC) : nullptr;
+  LogInventoryHandoff("pack", payload, scene, properties ? *reinterpret_cast<const LONG*>(properties + 0x40) : -1);
+  reinterpret_cast<void (__thiscall*)(void*, const BYTE*, void*)>(0x007A8AB0)(object, scene, message);
+}
+
+void __fastcall TraceNativeClientEvent(void* object, void*, const BYTE* event) {
+  const DWORD category = *reinterpret_cast<const DWORD*>(event + 4);
+  if (category == 0x33) {
+    static LONG failures = 0;
+    if (InterlockedIncrement(&failures) <= 32)
+      Log("native connection failure: client=%p recipient=%08lX%08lX flag=%u reason=%ld",
+          object, *reinterpret_cast<const DWORD*>(event + 0x1C), *reinterpret_cast<const DWORD*>(event + 0x18),
+          event[0x20], *reinterpret_cast<const LONG*>(event + 0x24));
+  }
+  const NativeDispatchContext context{object, category,
+      category == 0x2F ? *reinterpret_cast<const LONG*>(event + 0x1C) : -1};
+  const NativeDispatchContext* previous = g_nativeDispatchContext;
+  g_nativeDispatchContext = &context;
+  __try {
+    reinterpret_cast<void (__thiscall*)(void*, const BYTE*)>(0x00887380)(object, event);
+  } __finally {
+    g_nativeDispatchContext = previous;
+  }
+}
+
+__declspec(noinline) bool __cdecl TraceNativeDesyncAssert(bool condition, const char* expression, const char* file, int line) {
+  if (!condition) {
+    static LONG failures = 0;
+    if (InterlockedIncrement(&failures) <= 32)
+      Log("native desync assert: caller=%p expression=%.320s file=%.240s line=%d thread=%lu",
+          _ReturnAddress(), expression ? expression : "(null)", file ? file : "(null)", line, GetCurrentThreadId());
+  }
+  return reinterpret_cast<bool (__cdecl*)(bool, const char*, const char*, int)>(0x0086EA50)(
+      condition, expression, file, line);
+}
+
+void* __fastcall TraceNativeShutdownEventCtor(void* object, void*, unsigned long long recipient, bool flag, int reason) {
+  static LONG calls = 0;
+  if (InterlockedIncrement(&calls) <= 32)
+    Log("native shutdown producer: event=%p caller=%p recipient=%08lX%08lX flag=%d reason=%d",
+        object, _ReturnAddress(), static_cast<DWORD>(recipient >> 32), static_cast<DWORD>(recipient), flag, reason);
+  return reinterpret_cast<void* (__thiscall*)(void*, unsigned long long, bool, int)>(0x008585E0)(object, recipient, flag, reason);
+}
+
+bool __fastcall TraceNativeWorldReady(void* object, void*) {
+  const bool result = reinterpret_cast<bool (__thiscall*)(void*)>(0x008537D0)(object);
+  static LONG calls = 0;
+  if (InterlockedIncrement(&calls) <= 32) {
+    const BYTE* client = static_cast<const BYTE*>(object);
+    const BYTE* server = *reinterpret_cast<BYTE* const*>(client + 0x90);
+    const BYTE* gateway = *reinterpret_cast<BYTE**>(0x00DDEA04);
+    Log("native event readiness: client=%p ready=%d stage=%ld server=%p serverState=%ld gateway=%p gatewayState=%ld",
+        object, result, *reinterpret_cast<const LONG*>(client + 0x88), server,
+        server ? *reinterpret_cast<const LONG*>(server + 0xC) : -1, gateway,
+        gateway ? *reinterpret_cast<const LONG*>(gateway + 0x3C) : -1);
+  }
+  return result;
+}
+
+__declspec(noinline) int __fastcall TraceNativeQuitRequest(void* object, void*, int reason) {
+  static LONG calls = 0;
+  if (InterlockedIncrement(&calls) <= 32) {
+    const BYTE* bytes = static_cast<const BYTE*>(object);
+    Log("native quit request: object=%p caller=%p reason=%d stage=%ld previousReason=%ld deferredReason=%ld thread=%lu",
+        object, _ReturnAddress(), reason, *reinterpret_cast<const LONG*>(bytes + 0x118),
+        *reinterpret_cast<const LONG*>(bytes + 0x110), *reinterpret_cast<const LONG*>(bytes + 0x114),
+        GetCurrentThreadId());
+    if (g_nativeDispatchContext)
+      Log("native quit context: client=%p category=%lu topologyKind=%ld",
+          g_nativeDispatchContext->client, g_nativeDispatchContext->category, g_nativeDispatchContext->topologyKind);
+  }
+  return reinterpret_cast<int (__thiscall*)(void*, int)>(0x00889F50)(object, reason);
+}
+
 __declspec(noinline) bool __fastcall TraceNativeClientTopology(void* object, void*, const BYTE* event) {
-  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16)
+  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16) {
     LogNativeTeardown("client-event-16", object, _ReturnAddress());
+    LogTopologyEvent(event);
+  }
   return reinterpret_cast<bool (__thiscall*)(void*, const BYTE*)>(0x008827B0)(object, event);
 }
 
 __declspec(noinline) bool __fastcall TraceNativeServerTopology(void* object, void*, const BYTE* event) {
-  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16)
+  if (*reinterpret_cast<const DWORD*>(event + 0x1C) == 16) {
     LogNativeTeardown("server-event-16", object, _ReturnAddress());
+    LogTopologyEvent(event);
+  }
   return reinterpret_cast<bool (__thiscall*)(void*, const BYTE*)>(0x00874F20)(object, event);
+}
+
+__declspec(thread) coop_pause::SendContext* g_pauseSendContext = nullptr;
+
+bool __fastcall ValidatePauseAcknowledgement(BYTE* event, void*, BYTE* scene) {
+  const bool accepted = reinterpret_cast<bool (__thiscall*)(BYTE*, BYTE*)>(0x007AB7E0)(event, scene);
+  if (g_pauseAcknowledgementProbe && g_pauseSendContext &&
+      coop_pause::PreserveOriginalRequest(accepted, g_pauseSendContext, event, scene, event[0x34]))
+    Log("pause acknowledgement: original request semantics retained after native validation owner=%ld", *reinterpret_cast<LONG*>(event + 0x1C));
+  return accepted;
 }
 
 bool InstallNativeTeardownTrace(BYTE* base) {
@@ -616,6 +1098,16 @@ bool InstallNativeTeardownTrace(BYTE* base) {
       {0x00CB86AC, reinterpret_cast<void*>(0x00876B00), &TraceNativeP2PShutdown},
       {0x00CB8624, reinterpret_cast<void*>(0x008827B0), &TraceNativeClientTopology},
       {0x00CBCF04, reinterpret_cast<void*>(0x00874F20), &TraceNativeServerTopology},
+      {0x00CB81F0, reinterpret_cast<void*>(0x00861A40), &TraceNativeServerQuit},
+      {0x00CB9F50, reinterpret_cast<void*>(0x00861A40), &TraceNativeServerQuit},
+      {0x00CBC868, reinterpret_cast<void*>(0x00861A40), &TraceNativeServerQuit},
+      {0x00CBC4B0, reinterpret_cast<void*>(0x00889F50), &TraceNativeQuitRequest},
+      {0x00CC0C10, reinterpret_cast<void*>(0x00889F50), &TraceNativeQuitRequest},
+      {0x00CC0CF0, reinterpret_cast<void*>(0x00889F50), &TraceNativeQuitRequest},
+      {0x00CB861C, reinterpret_cast<void*>(0x00887380), &TraceNativeClientEvent},
+      {0x00C372D0, reinterpret_cast<void*>(0x007A8AB0), &TraceInventoryItemPack},
+      {0x00C372D4, reinterpret_cast<void*>(0x007A8B00), &TraceInventoryItemUnpack},
+      {0x00C3B3B4, reinterpret_cast<void*>(0x007AB7E0), &ValidatePauseAcknowledgement},
   };
   // These are original PC vtable entries, not OTR offsets or inline detours.
   for (const auto& patch : patches) {
@@ -636,6 +1128,90 @@ bool InstallNativeTeardownTrace(BYTE* base) {
   return true;
 }
 
+void LogPauseNegotiation(const char* phase, const char* kind, BYTE* scene, BYTE* event) {
+  __try {
+    BYTE* game = *reinterpret_cast<BYTE**>(0x00DDC3F0);
+    BYTE* state = game ? *reinterpret_cast<BYTE**>(game + 0x38) : nullptr;
+    BYTE* managers = scene ? *reinterpret_cast<BYTE**>(scene + 0x90) : nullptr;
+    BYTE* online = managers ? *reinterpret_cast<BYTE**>(managers + 0x98) : nullptr;
+    if (!scene || !event || !state || !online) { Log("pause negotiation: unavailable context"); return; }
+    const DWORD* status = reinterpret_cast<DWORD*>(state + 0x1DC);
+    Log("pause negotiation: phase=%s kind=%s local=%ld sender=%lu operation=%ld owner=%ld flag34=%u flag35=%u statuses=%08lX,%08lX,%08lX,%08lX pendingOwner=%ld pendingFlag=%u members=%u,%u,%u,%u thread=%lu",
+        phase, kind, *reinterpret_cast<LONG*>(scene + 0x98), (*reinterpret_cast<DWORD*>(event + 0xC) >> 6) & 3,
+        *reinterpret_cast<LONG*>(event + 0x14), *reinterpret_cast<LONG*>(event + 0x1C), event[0x34], event[0x35],
+        status[0], status[1], status[2], status[3], *reinterpret_cast<LONG*>(online + 0x8850), online[0x8854],
+        online[0x1A14], online[0x3424], online[0x4E34], online[0x6844], GetCurrentThreadId());
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("pause negotiation: observation fault=%08lX; original callback remains enabled", GetExceptionCode());
+  }
+}
+
+struct PauseDispatchContext { BYTE* scene; BYTE* event; };
+__declspec(thread) PauseDispatchContext* g_pauseDispatchContext = nullptr;
+
+void __fastcall SendPauseAcknowledgement(BYTE* manager, void*, BYTE* outgoing, const char* file, int line) {
+  if (g_pauseAcknowledgementProbe) {
+    const PauseDispatchContext* context = g_pauseDispatchContext;
+    bool valid = false;
+    int local = -1, sender = -1, owner = -1;
+    __try {
+      if (context && context->scene && context->event && manager && outgoing) {
+        BYTE* incoming = context->event;
+        local = *reinterpret_cast<int*>(context->scene + 0x98);
+        sender = (*reinterpret_cast<DWORD*>(incoming + 0xC) >> 6) & 3;
+        owner = *reinterpret_cast<int*>(incoming + 0x1C);
+        valid = *reinterpret_cast<BYTE**>(manager + 0xC) == context->scene &&
+            *reinterpret_cast<int*>(incoming + 0x14) == 0 &&
+            *reinterpret_cast<int*>(incoming + 0x18) == 5 && !incoming[0x34] &&
+            *reinterpret_cast<int*>(outgoing + 0x14) == 0 &&
+            *reinterpret_cast<int*>(outgoing + 0x18) == 5 &&
+            *reinterpret_cast<int*>(outgoing + 0x1C) == owner;
+      }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { valid = false; }
+    const auto decision = coop_pause::Classify(local, sender, owner);
+    if (!valid || decision == coop_pause::Acknowledgement::InvalidContext) {
+      Log("pause acknowledgement: FAILED context local=%d sender=%d owner=%d; stopping owned harness child", local, sender, owner);
+      TerminateProcess(GetCurrentProcess(), 0xE043C007);
+      return;
+    }
+    if (decision == coop_pause::Acknowledgement::RedundantPeerReply) {
+      Log("pause acknowledgement: no reply to peer acknowledgement local=%d sender=%d owner=%d; native receipt/quorum retained", local, sender, owner);
+      return;
+    }
+    Log("pause acknowledgement: forwarding original request reply local=%d sender=%d owner=%d", local, sender, owner);
+    // Other peers may acknowledge before this process receives the originator's
+    // request. Its own reply must retain that request's semantics, not open a new menu.
+    coop_pause::SendContext sendContext{outgoing, context->scene};
+    coop_pause::SendContext* previous = g_pauseSendContext;
+    g_pauseSendContext = &sendContext;
+    __try {
+      reinterpret_cast<void (__thiscall*)(BYTE*, BYTE*, const char*, int)>(0x00440BE0)(manager, outgoing, file, line);
+    } __finally { g_pauseSendContext = previous; }
+    return;
+  }
+  reinterpret_cast<void (__thiscall*)(BYTE*, BYTE*, const char*, int)>(0x00440BE0)(manager, outgoing, file, line);
+}
+
+void __cdecl TraceNativePauseMenu(BYTE* scene, BYTE* event) {
+  static LONG count = 0;
+  const bool trace = InterlockedIncrement(&count) <= 128;
+  if (trace) LogPauseNegotiation("enter", "pause", scene, event);
+  PauseDispatchContext context{scene, event};
+  PauseDispatchContext* previous = g_pauseDispatchContext;
+  g_pauseDispatchContext = &context;
+  __try { reinterpret_cast<void (__cdecl*)(BYTE*, BYTE*)>(0x0048CC30)(scene, event); }
+  __finally { g_pauseDispatchContext = previous; }
+  if (trace) LogPauseNegotiation("return", "pause", scene, event);
+}
+
+void __cdecl TraceNativeQuasiPause(BYTE* scene, BYTE* event) {
+  static LONG count = 0;
+  const bool trace = InterlockedIncrement(&count) <= 128;
+  if (trace) LogPauseNegotiation("enter", "quasi-pause", scene, event);
+  reinterpret_cast<void (__cdecl*)(BYTE*, BYTE*)>(0x0048CFA0)(scene, event);
+  if (trace) LogPauseNegotiation("return", "quasi-pause", scene, event);
+}
+
 bool InstallNativeTransitionTrace(BYTE* base) {
   if (!g_harness || !g_hostStateTransferProbe) return true;
   if (base != reinterpret_cast<BYTE*>(0x00400000)) return false;
@@ -651,6 +1227,36 @@ bool InstallNativeTransitionTrace(BYTE* base) {
       {0x00882573, 0x0087CF50, &TraceNativeFlowRegistration, {}},
       {0x00875082, 0x00873BE0, &TraceNativeServerDown, {}},
       {0x008829BF, 0x00873BE0, &TraceNativeServerDown, {}},
+      {0x00887B5F, 0x008537D0, &TraceNativeWorldReady, {}},
+      {0x0086ECCA, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x0087AE55, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x0087AE7C, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x00886FB7, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x00888404, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x008D5CCD, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x008D907D, 0x008585E0, &TraceNativeShutdownEventCtor, {}},
+      {0x0045B428, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0045B532, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0045B59F, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0045C421, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0045F1B7, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x004AA144, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x004BC965, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0051C735, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x007B8402, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x007B842A, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x00871F9D, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x00872364, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x0087290E, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x00873533, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x008735A2, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x00873632, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x00883C28, 0x0086EA50, &TraceNativeDesyncAssert, {}},
+      {0x007A8B1F, 0x00A4FA00, &TraceInventoryItemRead, {}},
+      {0x00865B4D, 0x007B7890, &ReceiveJipBroadcast, {}},
+      {0x00509E50, 0x0048CC30, &TraceNativePauseMenu, {}},
+      {0x00509E5F, 0x0048CFA0, &TraceNativeQuasiPause, {}},
+      {0x0048CD95, 0x00440BE0, &SendPauseAcknowledgement, {}},
   };
   for (auto& patch : patches) {
     patch.original[0] = 0xE8;
@@ -675,6 +1281,10 @@ bool InstallNativeTransitionTrace(BYTE* base) {
   }
   FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
   Log("native transition: bounded original-call tracing installed; no flow state overrides");
+  if (g_jipBroadcastQueueProbe)
+    Log("jip broadcast queue: enabled for four-player harness; 256-event FIFO, native world-completion replay");
+  if (g_pauseAcknowledgementProbe)
+    Log("pause acknowledgement: four-player probe enabled; reply only to originating request, native quorum unchanged");
   return InstallNativeTeardownTrace(base);
 }
 
@@ -2313,11 +2923,15 @@ unsigned long long __fastcall Fake_Matchmaking_JoinLobby(Proxy*, void*, unsigned
     const LobbyEnterResult failed = {lobby, 0, 0, {0, 0, 0}, 2, 0};
     return QueueCall(FakeCallType::LobbyEnter, &failed, sizeof(failed));
   }
-  if (lobby == kLocalLobbyId && WaitForSingleObject(g_busMutex, 1000) == WAIT_OBJECT_0) {
-    g_bus->lobbyMemberMask |= 1u << g_instance;
-    ReleaseMutex(g_busMutex);
+  if (lobby != kLocalLobbyId || !g_bus || !g_busMutex || !StartLobbyFrontendObserver() ||
+      WaitForSingleObject(g_busMutex, 1000) != WAIT_OBJECT_0) {
+    Log("loopback lobby: Player %d join failed; lobby/observer/membership unavailable", g_instance + 1);
+    const LobbyEnterResult failed = {lobby, 0, 0, {0, 0, 0}, 2, 0};
+    return QueueCall(FakeCallType::LobbyEnter, &failed, sizeof(failed));
   }
-  const LobbyEnterResult result = {lobby, 0xFFFFFFFFu, 0, {0, 0, 0}, lobby == kLocalLobbyId ? 1u : 2u, 0};
+  g_bus->lobbyMemberMask |= 1u << g_instance;
+  ReleaseMutex(g_busMutex);
+  const LobbyEnterResult result = {lobby, 0xFFFFFFFFu, 0, {0, 0, 0}, 1u, 0};
   Log("loopback lobby: Player %d joined lobby", g_instance + 1);
   return QueueCall(FakeCallType::LobbyEnter, &result, sizeof(result));
 }
@@ -2685,6 +3299,28 @@ ShowWindow_t Real_ShowWindow = ShowWindow;
 SetForegroundWindow_t Real_SetForegroundWindow = SetForegroundWindow;
 MessageBoxW_t Real_MessageBoxW = MessageBoxW;
 MessageBoxA_t Real_MessageBoxA = MessageBoxA;
+decltype(&SetCursorPos) Real_SetCursorPos = SetCursorPos;
+decltype(&GetCursorPos) Real_GetCursorPos = GetCursorPos;
+decltype(&ClipCursor) Real_ClipCursor = ClipCursor;
+decltype(&ShowCursor) Real_ShowCursor = ShowCursor;
+decltype(&SetCursor) Real_SetCursor = SetCursor;
+HarnessCursor g_harnessCursor;
+
+BOOL WINAPI Hook_SetCursorPos(int x, int y) {
+  return g_privateInputProbe ? g_harnessCursor.SetPosition(x, y) : Real_SetCursorPos(x, y);
+}
+BOOL WINAPI Hook_GetCursorPos(LPPOINT point) {
+  return g_privateInputProbe ? g_harnessCursor.GetPosition(point) : Real_GetCursorPos(point);
+}
+BOOL WINAPI Hook_ClipCursor(const RECT* rectangle) {
+  return g_privateInputProbe ? TRUE : Real_ClipCursor(rectangle);
+}
+int WINAPI Hook_ShowCursor(BOOL visible) {
+  return g_privateInputProbe ? g_harnessCursor.Show(visible) : Real_ShowCursor(visible);
+}
+HCURSOR WINAPI Hook_SetCursor(HCURSOR cursor) {
+  return g_privateInputProbe ? g_harnessCursor.SetShape(cursor) : Real_SetCursor(cursor);
+}
 
 BOOL WINAPI Hook_ShowWindow(HWND window, int command) {
   if (g_harness && command != SW_HIDE) {
@@ -2817,6 +3453,11 @@ Hook g_hooks[] = {
     {"KERNEL32.dll", "CreateMutexW", 0, reinterpret_cast<void*>(Hook_CreateMutexW), reinterpret_cast<void**>(&Real_CreateMutexW), false},
     {"USER32.dll", "ShowWindow", 0, reinterpret_cast<void*>(Hook_ShowWindow), reinterpret_cast<void**>(&Real_ShowWindow), false},
     {"USER32.dll", "SetForegroundWindow", 0, reinterpret_cast<void*>(Hook_SetForegroundWindow), reinterpret_cast<void**>(&Real_SetForegroundWindow), false},
+    {"USER32.dll", "SetCursorPos", 0, reinterpret_cast<void*>(Hook_SetCursorPos), reinterpret_cast<void**>(&Real_SetCursorPos), false},
+    {"USER32.dll", "GetCursorPos", 0, reinterpret_cast<void*>(Hook_GetCursorPos), reinterpret_cast<void**>(&Real_GetCursorPos), false},
+    {"USER32.dll", "ClipCursor", 0, reinterpret_cast<void*>(Hook_ClipCursor), reinterpret_cast<void**>(&Real_ClipCursor), false},
+    {"USER32.dll", "ShowCursor", 0, reinterpret_cast<void*>(Hook_ShowCursor), reinterpret_cast<void**>(&Real_ShowCursor), false},
+    {"USER32.dll", "SetCursor", 0, reinterpret_cast<void*>(Hook_SetCursor), reinterpret_cast<void**>(&Real_SetCursor), false},
     {"USER32.dll", "MessageBoxW", 0, reinterpret_cast<void*>(Hook_MessageBoxW), reinterpret_cast<void**>(&Real_MessageBoxW), false},
     {"USER32.dll", "MessageBoxA", 0, reinterpret_cast<void*>(Hook_MessageBoxA), reinterpret_cast<void**>(&Real_MessageBoxA), false},
     {"ole32.dll", "CoCreateInstance", 0, reinterpret_cast<void*>(Hook_CoCreateInstance), reinterpret_cast<void**>(&Real_CoCreateInstance), false},
@@ -3774,6 +4415,7 @@ DWORD WINAPI LobbyFrontendObserverThread(LPVOID) {
   for (int wait = 0; wait < 1200 && (!g_bus || !(g_bus->lobbyMemberMask & selfBit)); wait++) Sleep(250);
   if (!g_bus || !(g_bus->lobbyMemberMask & selfBit)) {
     Log("lobby frontend: native session observer timed out before lobby membership");
+    InterlockedExchange(&g_lobbyFrontendObserverStarted, 0);
     return 0;
   }
   auto* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
@@ -3791,6 +4433,7 @@ DWORD WINAPI LobbyFrontendObserverThread(LPVOID) {
   }
   if (!observedP2P) {
     Log("lobby frontend: native session observer timed out before P2P client creation");
+    InterlockedExchange(&g_lobbyFrontendObserverStarted, 0);
     return 0;
   }
   Log("lobby frontend: native session observation started p2p=%p", observedP2P);
@@ -3815,6 +4458,21 @@ DWORD WINAPI LobbyFrontendObserverThread(LPVOID) {
     }
     Sleep(1000);
   }
+}
+
+bool StartLobbyFrontendObserver() {
+  if (!g_harness || !g_lobbyFrontendProbe || g_directP2PProbe || g_instance <= 0) return true;
+  if (InterlockedCompareExchange(&g_lobbyFrontendObserverStarted, 1, 0)) return true;
+  // Start at the real join request, not process boot: slow menu navigation must not consume its lifetime.
+  HANDLE observer = CreateThread(nullptr, 0, LobbyFrontendObserverThread, nullptr, 0, nullptr);
+  if (!observer) {
+    Log("lobby frontend: observer creation failed error=%lu", GetLastError());
+    InterlockedExchange(&g_lobbyFrontendObserverStarted, 0);
+    return false;
+  }
+  CloseHandle(observer);
+  Log("lobby frontend: observer started for actual join request");
+  return true;
 }
 
 bool ConfigureHarnessCampaign(void* online, bool isHost) {
@@ -4358,8 +5016,17 @@ void ProbeFourPlayerEngine() {
       settingRefs, getterMatches, attributesMatches, coopUserMatches, addHumanMatches, getHumanMatches);
 
   if (g_instance == 0 && nt->OptionalHeader.SizeOfImage > 0 && nt->OptionalHeader.SizeOfImage < 0x10000000) {
+    wchar_t outputRoot[MAX_PATH], absoluteRoot[MAX_PATH];
+    const DWORD rootLength = GetEnvironmentVariableW(L"DR2_COOP_DUMP_ROOT", outputRoot, MAX_PATH);
     wchar_t path[MAX_PATH];
-    swprintf(path, MAX_PATH, L"%scoop_unpacked_image.bin", g_root);
+    const DWORD absoluteLength = rootLength && rootLength < MAX_PATH ?
+        GetFullPathNameW(outputRoot, MAX_PATH, absoluteRoot, nullptr) : 0;
+    if (!absoluteLength || absoluteLength + wcslen(L"\\coop_unpacked_image.bin") + 1 > MAX_PATH ||
+        _wcsicmp(outputRoot, absoluteRoot) != 0 ||
+        swprintf_s(path, MAX_PATH, L"%s\\coop_unpacked_image.bin", absoluteRoot) < 0) {
+      Log("engine probe: unpacked image skipped; explicit absolute DR2_COOP_DUMP_ROOT required");
+      return;
+    }
     FILE* dump = nullptr;
     if (_wfopen_s(&dump, path, L"wb") == 0 && dump) {
       BYTE* zeros = static_cast<BYTE*>(calloc(1, nt->OptionalHeader.SizeOfImage));
@@ -4397,6 +5064,7 @@ DWORD WINAPI EngineProbeThread(LPVOID) {
   InstallClothingCapacityProbe(reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr)));
   InstallNativeTransitionTrace(reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr)));
   InstallNfsOwnershipProbe(reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr)));
+  InstallLoaderWaitTrace(reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr)));
   return 0;
 }
 
@@ -4442,8 +5110,16 @@ void Initialize(const wchar_t* root) {
   g_nativeFlowProbe = g_harness && g_hostStateTransferProbe && wcsstr(commandLine, L"-coopnativeflowprobe") != nullptr;
   g_nfsOwnershipProbe = g_nativeFlowProbe && g_requestedPlayers == 4 &&
       wcsstr(commandLine, L"-coopnfsownershipprobe") != nullptr;
+  g_jipBroadcastQueueProbe = g_nativeFlowProbe && g_requestedPlayers == 4 &&
+      wcsstr(commandLine, L"-coopjipbroadcastqueue") != nullptr;
+  g_pauseAcknowledgementProbe = g_nativeFlowProbe && g_requestedPlayers == 4 &&
+      wcsstr(commandLine, L"-cooppauseackprobe") != nullptr;
+  g_loaderWaitProbe = g_harness && wcsstr(commandLine, L"-cooploaderwaitprobe") != nullptr;
+  g_privateInputProbe = g_harness && g_silent && wcsstr(commandLine, L"-coopprivatemouse") != nullptr;
   g_meshListenerProbe = g_harness && wcsstr(commandLine, L"-coopmeshlistenerprobe") != nullptr;
   g_clothingCapacityProbe = g_harness && wcsstr(commandLine, L"-coopclothingcapacityprobe") != nullptr;
+  g_clothingVariantsProbe = g_clothingCapacityProbe && g_requestedPlayers == 4 &&
+      wcsstr(commandLine, L"-coopclothingvariants") != nullptr;
   g_lobbyFrontendProbe = g_harness && wcsstr(commandLine, L"-cooplobbyfrontend") != nullptr;
   g_bridgeFourthPeer = g_directP2PProbe &&
       wcsstr(commandLine, L"-coopbridgefourth") != nullptr;
@@ -4532,10 +5208,6 @@ void Initialize(const wchar_t* root) {
       HANDLE directP2P = CreateThread(nullptr, 0, DirectHostProbeThread, nullptr, 0, nullptr);
       if (directP2P) CloseHandle(directP2P);
     }
-    if (g_lobbyFrontendProbe && !g_directP2PProbe && g_instance > 0) {
-      HANDLE lobbyObserver = CreateThread(nullptr, 0, LobbyFrontendObserverThread, nullptr, 0, nullptr);
-      if (lobbyObserver) CloseHandle(lobbyObserver);
-    }
   }
   HANDLE thread = CreateThread(nullptr, 0, PatchThread, nullptr, 0, nullptr);
   if (thread) CloseHandle(thread);
@@ -4556,6 +5228,8 @@ bool HostStateTransferPending() { return HostStateTransferPendingInternal(); }
 void StartHostStateTransferOnCurrentThread() { StartHostStateTransferOnCurrentThreadInternal(); }
 bool HostFlow7FinalizePending() { return HostFlow7FinalizePendingInternal(); }
 void FinalizeHostFlow7OnCurrentThread() { FinalizeHostFlow7OnCurrentThreadInternal(); }
+bool ClothingVariantsPending() { return ClothingVariantsPendingInternal(); }
+void ApplyClothingVariantsOnCurrentThread() { ApplyClothingVariantsOnCurrentThreadInternal(); }
 int Instance() { return g_instance; }
 void TraceInput(int code, bool down) { Log("script input: DIK=%d %s", code, down ? "down" : "up"); }
 

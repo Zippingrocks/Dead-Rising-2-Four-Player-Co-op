@@ -26,6 +26,8 @@ param(
     [switch]$SaveProbe,
     [string]$SaveFixturePath,
     [switch]$ThreadSnapshots,
+    [switch]$NativeUpdateStallSnapshots,
+    [switch]$SeparateConfirmedJoiners,
     [switch]$StockTransport = $true,
     [switch]$SequentialJoins = $true,
     [switch]$ActorActivationProbe,
@@ -35,9 +37,11 @@ param(
     [switch]$NfsOwnershipProbe,
     [switch]$JipBroadcastQueueProbe,
     [switch]$PauseAcknowledgementProbe,
+    [switch]$LoaderWaitProbe,
     [switch]$PrivateMouseProbe,
     [switch]$MeshListenerProbe,
     [switch]$ClothingCapacityProbe,
+    [switch]$ClothingVariantsProbe,
     [switch]$StockSafehouseContent,
     [switch]$StockStreamedAssetsContent,
     [switch]$NetworkSnapshots,
@@ -47,6 +51,14 @@ param(
 # Hidden local integration harness. Campaign probes use disposable per-instance save storage, not Steam Cloud.
 # Process survival, native admission, mesh readiness, and actual gameplay are separate evidence gates.
 $ErrorActionPreference = "Stop"
+function Get-Sha256([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '') }
+        finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
+}
 if ($Instances -gt $SessionPlayers) { throw 'Instances must not exceed SessionPlayers' }
 if ($NfsOwnershipProbe -and (-not $NativeFlowProbe -or $SessionPlayers -ne 4)) {
     throw 'NFS ownership probe requires four-player native-flow control'
@@ -63,6 +75,9 @@ if ($NativeFlowProbe -and (-not $HostStateTransferProbe -or -not $ConfirmCampaig
 }
 if ($ConfirmCampaignAdmission -and (-not $CampaignAdmissionProbe -or -not $LobbyNativeHostProbe -or -not $LobbyJoinProbe)) {
     throw 'Explicit admission confirmation requires native lobby joining and the admission probe'
+}
+if ($SeparateConfirmedJoiners -and -not $ConfirmCampaignAdmission) {
+    throw 'Confirmed-joiner separation requires explicit campaign admission confirmation'
 }
 if ($SaveFixturePath -and -not (Test-Path -LiteralPath $SaveFixturePath -PathType Leaf)) {
     throw "Save fixture does not exist: $SaveFixturePath"
@@ -87,13 +102,17 @@ $outcome = [ordered]@{
         NfsOwnershipProbe = [bool]$NfsOwnershipProbe;
         JipBroadcastQueueProbe = [bool]$JipBroadcastQueueProbe;
         PauseAcknowledgementProbe = [bool]$PauseAcknowledgementProbe;
+        LoaderWaitProbe = [bool]$LoaderWaitProbe;
         PrivateMouseProbe = [bool]$PrivateMouseProbe;
         MeshListenerProbe = [bool]$MeshListenerProbe;
         ClothingCapacityProbe = [bool]$ClothingCapacityProbe;
+        ClothingVariantsProbe = [bool]$ClothingVariantsProbe;
         StockSafehouseContent = [bool]$StockSafehouseContent;
         StockStreamedAssetsContent = [bool]$StockStreamedAssetsContent;
         NetworkSnapshots = [bool]$NetworkSnapshots;
         SaveProbe = [bool]$SaveProbe; SaveFixturePath = $SaveFixturePath; ThreadSnapshots = [bool]$ThreadSnapshots;
+        NativeUpdateStallSnapshots = [bool]$NativeUpdateStallSnapshots;
+        SeparateConfirmedJoiners = [bool]$SeparateConfirmedJoiners;
         MenuProbe = [bool]$MenuProbe; LobbyProbe = [bool]$LobbyProbe;
         CampaignMenuProbe = [bool]$CampaignMenuProbe; CampaignLaunchProbe = [bool]$CampaignLaunchProbe;
         LobbyJoinProbe = [bool]$LobbyJoinProbe; LobbyClientOnlyProbe = [bool]$LobbyClientOnlyProbe;
@@ -106,6 +125,7 @@ $started = @()
 $contentSwap = @()
 $networkSnapshotIndex = 0
 $monitors = @()
+$stallWatchers = @()
 $monitorExe = Join-Path $workspace 'tools\dr2-crash-dump-monitor\bin\Release\net8.0\DR2CrashDumpMonitor.exe'
 $desktops = @()
 $previousSteamAppId = $env:SteamAppId
@@ -355,10 +375,10 @@ function Stage-StockSafehouse {
         $live = $file.Live
         $original = $file.Original
         $backup = $file.Backup
-        $before = (Get-FileHash -LiteralPath $live -Algorithm SHA256).Hash
-        $stock = (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash
+        $before = Get-Sha256 $live
+        $stock = Get-Sha256 $original
         Copy-Item -LiteralPath $live -Destination $backup
-        if ((Get-FileHash -LiteralPath $backup).Hash -ne $before) { throw "Content backup mismatch: $live" }
+        if ((Get-Sha256 $backup) -ne $before) { throw "Content backup mismatch: $live" }
         [pscustomobject]@{ Live = $live; Original = $original; Backup = $backup;
             BeforeSha256 = $before; StockSha256 = $stock; Installed = $false; Restored = $false }
     })
@@ -366,7 +386,7 @@ function Stage-StockSafehouse {
     foreach ($entry in $contentSwap) {
         try {
             Copy-Item -LiteralPath $entry.Original -Destination $entry.Live -Force
-            if ((Get-FileHash -LiteralPath $entry.Live).Hash -ne $entry.StockSha256) {
+            if ((Get-Sha256 $entry.Live) -ne $entry.StockSha256) {
                 throw "Staged content mismatch: $($entry.Live)"
             }
             $entry.Installed = $true
@@ -382,14 +402,14 @@ function Restore-TestContent {
     foreach ($entry in $contentSwap) {
         if (-not $entry.Installed) { continue }
         try {
-            if ((Get-FileHash -LiteralPath $entry.Live).Hash -ne $entry.StockSha256) {
+            if ((Get-Sha256 $entry.Live) -ne $entry.StockSha256) {
                 throw 'Installed file changed during the test; preserving it instead of overwriting another edit'
             }
-            if ((Get-FileHash -LiteralPath $entry.Backup).Hash -ne $entry.BeforeSha256) {
+            if ((Get-Sha256 $entry.Backup) -ne $entry.BeforeSha256) {
                 throw 'Pre-test backup no longer matches its recorded hash'
             }
             Copy-Item -LiteralPath $entry.Backup -Destination $entry.Live -Force
-            $entry.Restored = (Get-FileHash -LiteralPath $entry.Live).Hash -eq $entry.BeforeSha256
+            $entry.Restored = (Get-Sha256 $entry.Live) -eq $entry.BeforeSha256
             if (-not $entry.Restored) { throw 'Restored content hash mismatch' }
         } catch {
             $outcome.Status = 'content-restore-failed'
@@ -409,8 +429,9 @@ foreach ($instance in 0..($Instances - 1)) {
     }
 }
 if (-not (Test-Path -LiteralPath $gameExe)) { throw "Missing game executable: $gameExe" }
-$outcome.RuntimeSha256 = (Get-FileHash -LiteralPath (Join-Path $GameRoot 'dinput8.dll') -Algorithm SHA256).Hash
-if (($CrashMonitor -or $ThreadSnapshots) -and -not (Test-Path -LiteralPath $monitorExe)) { throw "Missing crash monitor: $monitorExe" }
+$outcome.RuntimeSha256 = Get-Sha256 (Join-Path $GameRoot 'dinput8.dll')
+if (($CrashMonitor -or $ThreadSnapshots -or $NativeUpdateStallSnapshots) -and
+    -not (Test-Path -LiteralPath $monitorExe)) { throw "Missing crash monitor: $monitorExe" }
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 if (Test-Path -LiteralPath $renderPath) { Copy-Item -LiteralPath $renderPath -Destination $renderBackup }
 
@@ -466,9 +487,11 @@ try {
         if ($NfsOwnershipProbe) { $arguments += ' -coopnfsownershipprobe' }
         if ($JipBroadcastQueueProbe) { $arguments += ' -coopjipbroadcastqueue' }
         if ($PauseAcknowledgementProbe) { $arguments += ' -cooppauseackprobe' }
+        if ($LoaderWaitProbe) { $arguments += ' -cooploaderwaitprobe' }
         if ($PrivateMouseProbe) { $arguments += ' -coopprivatemouse' }
         if ($MeshListenerProbe) { $arguments += ' -coopmeshlistenerprobe' }
         if ($ClothingCapacityProbe) { $arguments += ' -coopclothingcapacityprobe' }
+        if ($ClothingVariantsProbe) { $arguments += ' -coopclothingvariants' }
         if ($LobbyProbe) { $arguments += ' -cooplobbyfrontend' }
         if ($UseIsolatedDesktops) {
             $arguments += " -coopdesktop"
@@ -576,12 +599,29 @@ try {
                                     ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $runRoot 'admission-input.jsonl')
                                 Pulse-InstanceKeys @(0) 28 100
                                 Start-Sleep -Seconds 8
-                                Request-Captures
+                                # All four D3D9 devices can still be settling after the final admission.
+                                # The native confirmed-member trace is the gate here; avoid a simultaneous
+                                # frame readback when a native-update watchdog run will take later evidence.
+                                if (-not $NativeUpdateStallSnapshots) { Request-Captures }
                             }
                         }
                         if ($ConfirmCampaignAdmission) {
                             $peer = '{0:X16}' -f ([uint64]0x0110000170000000 + $joiner)
                             Wait-InstanceTrace 0 ("client table: slot=\d+ peer=$peer index=\d+ confirmed=1 leaving=0")
+                        }
+                    }
+                    if ($SeparateConfirmedJoiners) {
+                        # Membership confirmation precedes local actor activation. Wait for every owner to
+                        # leave single-player mode, then disperse the three joiners before their capsules can
+                        # settle into the same safehouse collision pocket. This remains native private input.
+                        $separationKeys = @(31, 32, 17)
+                        foreach ($joiner in @($joiners | Sort-Object -Descending)) {
+                            Wait-InstanceTrace $joiner ("campaign actors:.*localSlot=$joiner singlePlayer=0 gameType=1") 1 60
+                            $scanCode = $separationKeys[$joiner - 1]
+                            [pscustomobject]@{ Timestamp=(Get-Date).ToString('o'); Instance=$joiner;
+                                Caller=$joiner; ScanCode=$scanCode; Action='Separate activated joiner after complete admission' } |
+                                ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $runRoot 'admission-input.jsonl')
+                            Pulse-InstanceKeys @($joiner) $scanCode 1200
                         }
                     }
                 } else {
@@ -606,6 +646,18 @@ try {
                 -RedirectStandardError (Join-Path $runRoot "threads.$instance.stderr.txt")
             if ($snapshot.ExitCode -ne 0) { throw "Thread snapshot failed for instance $instance" }
         }
+    }
+    if ($NativeUpdateStallSnapshots) {
+        $watcherScript = Join-Path $PSScriptRoot 'watch_native_update_stall.py'
+        if (-not (Test-Path -LiteralPath $watcherScript)) { throw "Missing stall watcher: $watcherScript" }
+        $hostProcess = $started[0]
+        $watcherArgs = '"{0}" --pid {1} --log "{2}" --output "{3}" --monitor "{4}" --timeout-seconds {5}' -f
+            $watcherScript, $hostProcess.Id, (Join-Path $GameRoot 'coop_net.log'),
+            (Join-Path $runRoot 'threads-native-update-stall.0.json'), $monitorExe, $DurationSeconds
+        $stallWatchers += Start-Process -FilePath (Get-Command python).Source -ArgumentList $watcherArgs `
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $runRoot 'native-update-stall-watcher.stdout.txt') `
+            -RedirectStandardError (Join-Path $runRoot 'native-update-stall-watcher.stderr.txt')
     }
     $outcome.Status = 'observing'
     $deadline = (Get-Date).AddSeconds($DurationSeconds)
@@ -653,6 +705,12 @@ try {
             ExitCode = if ($_.HasExited) { $_.ExitCode } else { $null } }
     })
     $outcome | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runRoot 'outcome.json')
+    foreach ($watcher in $stallWatchers) {
+        $watcher.Refresh()
+        if (-not $watcher.HasExited -and -not $watcher.WaitForExit(2000)) {
+            Stop-Process -Id $watcher.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
     if (-not $KeepRunning -or $outcome.Status -ne 'observation-completed') { Stop-HarnessProcesses }
     foreach ($monitor in $monitors) {
         # Full-memory dumps can take minutes under simultaneous four-process I/O.

@@ -23,6 +23,7 @@
 #include "save_namespace.h"
 #include "local_save_storage.h"
 #include "harness_keyboard.h"
+#include "harness_mouse.h"
 
 #pragma comment(linker, "/EXPORT:DirectInput8Create=_CZ_DirectInput8Create@20")
 
@@ -44,6 +45,8 @@ bool HostStateTransferPending();
 void StartHostStateTransferOnCurrentThread();
 bool HostFlow7FinalizePending();
 void FinalizeHostFlow7OnCurrentThread();
+bool ClothingVariantsPending();
+void ApplyClothingVariantsOnCurrentThread();
 int Instance();
 void TraceInput(int code, bool down);
 }
@@ -630,7 +633,6 @@ DWORD g_lastHarnessActivation = 0;
 volatile LONG g_harnessNeedsActivation = 1;
 int g_harnessCaptureIndex = 0;
 wchar_t g_harnessCaptureRoot[MAX_PATH]{};
-void* g_harnessDevice = nullptr;
 HWND g_harnessWindow = nullptr;
 WNDPROC g_harnessWndProc = nullptr;
 PVOID volatile g_harnessRatingLogoScreen = nullptr;
@@ -682,6 +684,7 @@ LRESULT CALLBACK HarnessWndProc(HWND window, UINT message, WPARAM wParam, LPARAM
     coop::RequestClientDataTransferOnCurrentThread();
     coop::StartHostStateTransferOnCurrentThread();
     coop::FinalizeHostFlow7OnCurrentThread();
+    coop::ApplyClothingVariantsOnCurrentThread();
     return 0;
   }
   // DR2 PC's WndProc calls SuspendAllViewports for WM_ACTIVATE(WA_INACTIVE). Keep only the
@@ -701,6 +704,7 @@ void TryCaptureHarnessFrame(void* device) {
   swprintf(request, MAX_PATH, L"%scoop_capture.%d.flag", g_root, coop::Instance());
   if (GetFileAttributesW(request) == INVALID_FILE_ATTRIBUTES) return;
   DeleteFileW(request);
+  const DWORD captureStarted = GetTickCount();
 
   using GetBackBuffer_t = HRESULT(__stdcall*)(void*, UINT, UINT, int, void**);
   using Release_t = ULONG(__stdcall*)(void*);
@@ -721,7 +725,8 @@ void TryCaptureHarnessFrame(void* device) {
     if (fresh && FAILED(result)) DeleteFileW(output);
     void** surfaceVtable = *reinterpret_cast<void***>(surface);
     reinterpret_cast<Release_t>(surfaceVtable[2])(surface);
-    Log(1, "d3d9: hidden frame capture %ls result=%08lX", output, static_cast<DWORD>(result));
+    Log(1, "d3d9: hidden frame capture %ls result=%08lX elapsedMs=%lu", output,
+        static_cast<DWORD>(result), GetTickCount() - captureStarted);
   } else {
     if (result == static_cast<HRESULT>(0x88760868)) InterlockedExchange(&g_harnessNeedsActivation, 1);
     Log(1, "d3d9: GetBackBuffer for hidden capture failed result=%08lX", static_cast<DWORD>(result));
@@ -862,7 +867,6 @@ HRESULT __stdcall Hook_CreateDevice(void* d3d, UINT adapter, DWORD type, HWND wi
     }
     if (g_harnessFrameMs) PatchVtableSlot(*device, 17, reinterpret_cast<void*>(&Hook_Present), reinterpret_cast<void**>(&Real_Present));
     PatchVtableSlot(*device, 86, reinterpret_cast<void*>(&Hook_CreateVertexDeclaration), reinterpret_cast<void**>(&Real_CreateVertexDeclaration));
-    if (coop::IsHarness()) g_harnessDevice = *device;
     Log(1, "d3d9: device created; vertex-declaration diagnostics active");
   }
   return result;
@@ -1619,6 +1623,7 @@ DWORD WINAPI CampaignThread(LPVOID) {
 // ---- Scripted keyboard input for unattended tests. Case Zero uses case_zero_input.txt; the four-player harness uses
 // coop_input.N.txt per process. Each file lists held DIK scan codes (decimal, whitespace-separated, e.g. 28 for Enter).
 const GUID kGuidSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+const GUID kGuidSysMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
 using CreateDevice8_t = HRESULT(__stdcall*)(void*, REFGUID, void**, void*);
 using GetDeviceState_t = HRESULT(__stdcall*)(void*, DWORD, void*);
 using GetDeviceData_t = HRESULT(__stdcall*)(void*, DWORD, void*, DWORD*, DWORD);
@@ -1630,12 +1635,36 @@ BYTE g_reportedKeys[256];
 BYTE g_stateLoggedKeys[256];
 DWORD g_scriptPolled = 0;
 HarnessKeyboard g_harnessKeyboard;
+HarnessMouse g_harnessMouse;
+DWORD g_mouseCommandSeen = 0;
+volatile LONG g_privateMouseEnabled = 0;
+
+void PollHarnessMouse(DWORD now) {
+  wchar_t path[MAX_PATH];
+  swprintf(path, MAX_PATH, L"%scoop_mouse.%d.txt", g_root, coop::Instance());
+  FILE* file = _wfsopen(path, L"r", _SH_DENYNO);
+  if (!file) { g_harnessMouse.ReleaseButtons(now); return; }
+  DWORD sequence = 0, buttons = 0;
+  LONG x = 0, y = 0, z = 0;
+  const int fields = fscanf_s(file, "%lu %ld %ld %ld %lu", &sequence, &x, &y, &z, &buttons);
+  fclose(file);
+  if (fields != 5 || !sequence) { g_harnessMouse.ReleaseButtons(now); return; }
+  if (sequence == g_mouseCommandSeen) return;
+  g_mouseCommandSeen = sequence;
+  if (g_harnessMouse.Submit(sequence, x, y, z, buttons, now))
+    Log(1, "input: mouse accepted sequence=%lu axes=%ld,%ld,%ld buttons=%lu", sequence, x, y, z, buttons);
+  else {
+    g_harnessMouse.ReleaseButtons(now);
+    Log(1, "input: mouse rejected sequence=%lu", sequence);
+  }
+}
 
 void PollScriptKeys(bool background = false) {
   if (coop::IsHarness() && !background) return;
   const DWORD now = GetTickCount();
   if (now - g_scriptPolled < 50) return;
   g_scriptPolled = now;
+  if (coop::IsHarness() && InterlockedCompareExchange(&g_privateMouseEnabled, 0, 0)) PollHarnessMouse(now);
   memset(g_scriptKeys, 0, sizeof(g_scriptKeys));
   wchar_t path[MAX_PATH];
   if (coop::IsHarness()) swprintf(path, MAX_PATH, L"%scoop_input.%d.txt", g_root, coop::Instance());
@@ -1670,14 +1699,15 @@ DWORD WINAPI ScriptInputThread(LPVOID) {
                             coop::ClientTransitionPending() ||
                             coop::ClientDataTransferRequestPending() ||
                             coop::HostStateTransferPending() ||
-                            coop::HostFlow7FinalizePending()))
+                            coop::HostFlow7FinalizePending() ||
+                            coop::ClothingVariantsPending()))
       PostMessageW(g_harnessWindow, kHarnessActivateCampaign, 0, 0);
     if (g_harnessWndProc && g_harnessWindow && now - g_lastHarnessActivation >= 1000 &&
         (InterlockedCompareExchange(&g_harnessNeedsActivation, 0, 0) != 0 || HarnessGameInactive())) {
       PostMessageW(g_harnessWindow, kHarnessActivate, 0, 0);
       g_lastHarnessActivation = now;
     }
-    if (g_harnessDevice) TryCaptureHarnessFrame(g_harnessDevice);
+    // GPU readback can block for seconds. Only Present captures frames; input must keep polling.
     Sleep(20);
   }
 }
@@ -1733,8 +1763,58 @@ HRESULT __stdcall Hook_GetDeviceData(void* device, DWORD objectSize, void* data,
   return result;
 }
 
+HRESULT __stdcall HarnessMouseState(void*, DWORD size, void* data) {
+  DWORD sequence = 0;
+  const HRESULT result = g_harnessMouse.State(size, data, &sequence);
+  if (SUCCEEDED(result)) {
+    static DWORD lastSequence = 0, lastButtons = 0;
+    DWORD buttons = 0;
+    for (DWORD i = 0; i < size - 12; ++i) if (static_cast<BYTE*>(data)[12 + i]) buttons |= 1u << i;
+    const LONG* axes = static_cast<const LONG*>(data);
+    if (sequence != lastSequence || buttons != lastButtons || axes[0] || axes[1] || axes[2])
+      Log(1, "input: mouse consumed sequence=%lu axes=%ld,%ld,%ld buttons=%lu", sequence, axes[0], axes[1], axes[2], buttons);
+    lastSequence = sequence;
+    lastButtons = buttons;
+  }
+  return result;
+}
+
+HRESULT __stdcall HarnessMouseData(void*, DWORD size, void* data, DWORD* count, DWORD flags) {
+  return g_harnessMouse.Data(size, data, count, flags);
+}
+
+HRESULT __stdcall HarnessDeviceReady(void*) { return S_OK; }
+
+void InstallHarnessInputDevice(void* device, bool mouse) {
+  // Device8 has 32 slots in the Windows SDK. Clone per object: keyboard/mouse
+  // may share a hardware vtable, and unrelated controllers must remain untouched.
+  static void* tables[8][32]{};
+  static LONG allocated = 0;
+  void** original = *reinterpret_cast<void***>(device);
+  for (auto& table : tables) if (original == table) return;
+  const LONG index = InterlockedIncrement(&allocated) - 1;
+  if (index >= 8) {
+    Log(1, "input: private device capacity exceeded; aborting owned harness child");
+    TerminateProcess(GetCurrentProcess(), 0xE043C006);
+    return;
+  }
+  void** table = tables[index];
+  memcpy(table, original, sizeof(tables[index]));
+  table[7] = table[8] = table[25] = reinterpret_cast<void*>(&HarnessDeviceReady);
+  table[9] = mouse ? reinterpret_cast<void*>(&HarnessMouseState) : reinterpret_cast<void*>(&Hook_GetDeviceState);
+  table[10] = mouse ? reinterpret_cast<void*>(&HarnessMouseData) : reinterpret_cast<void*>(&Hook_GetDeviceData);
+  InterlockedExchangePointer(reinterpret_cast<void* volatile*>(device), table);
+  Log(1, "input: private %s device installed; hardware input and acquisition isolated", mouse ? "mouse" : "keyboard");
+}
+
 HRESULT __stdcall Hook_CreateDevice8(void* input, REFGUID guid, void** device, void* outer) {
   const HRESULT result = Real_CreateDevice8(input, guid, device, outer);
+  if (SUCCEEDED(result) && device && *device && coop::IsHarness() && wcsstr(GetCommandLineW(), L"-coopprivatemouse") &&
+      (IsEqualGUID(guid, kGuidSysKeyboard) || IsEqualGUID(guid, kGuidSysMouse))) {
+    InterlockedExchange(&g_privateMouseEnabled, 1);
+    InstallHarnessInputDevice(*device, IsEqualGUID(guid, kGuidSysMouse));
+    return result;
+  }
   if (SUCCEEDED(result) && device && *device && IsEqualGUID(guid, kGuidSysKeyboard)) {
     PatchVtableSlot(*device, 9, reinterpret_cast<void*>(&Hook_GetDeviceState), reinterpret_cast<void**>(&Real_GetDeviceState));
     PatchVtableSlot(*device, 10, reinterpret_cast<void*>(&Hook_GetDeviceData), reinterpret_cast<void**>(&Real_GetDeviceData));

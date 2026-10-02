@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from report_harness import actor_activation_valid, clothing_snapshot_ready, latest_mesh_snapshot, loading_evidence, mesh_snapshot_connected, scan_log, scan_native_flow, scan_native_teardown, scan_nfs_ownership, scan_save_probe, summarize
+from report_harness import analyze_local_control, analyze_phase2_combat, analyze_transition_control, actor_activation_valid, clothing_snapshot_ready, latest_mesh_snapshot, loading_evidence, mesh_snapshot_connected, scan_log, scan_native_flow, scan_native_teardown, scan_nfs_ownership, scan_save_probe, summarize
 
 
 def endpoint(peer, state, time="12:01:00.000"):
@@ -11,6 +11,170 @@ def endpoint(peer, state, time="12:01:00.000"):
 
 
 class HarnessEvidenceTests(unittest.TestCase):
+    def test_phase2_combat_requires_four_owned_kills_damage_ko_and_teammate_revive(self):
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            pids = [301, 302, 303, 304]
+
+            def snapshot(captured, kills, health=None, ready=None):
+                health = health or [400.0] * 4
+                ready = ready or [False] * 4
+                return [{'pid': pid, 'captured_at': captured, 'local_user': observer,
+                         'local_zombie_kills': kills[observer], 'players': [
+                             {'slot': slot, 'effective_health': health[slot],
+                              'ready_to_revive': ready[slot]} for slot in range(4)]}
+                        for observer, pid in enumerate(pids)]
+
+            checkpoints = [
+                ('phase2-baseline', '20:00:00', [0, 0, 0, 0], None, None),
+                ('phase2-after-player-1-kill', '20:01:00', [1, 0, 0, 0], None, None),
+                ('phase2-after-player-2-kill', '20:02:00', [1, 1, 0, 0], None, None),
+                ('phase2-after-player-3-kill', '20:03:00', [1, 1, 1, 0], None, None),
+                ('phase2-after-player-4-kill', '20:04:00', [1, 1, 1, 1], None, None),
+                ('phase2-damage-before', '20:05:00', [1, 1, 1, 1], None, None),
+                ('phase2-damage-after', '20:06:00', [1, 1, 1, 1], [300, 400, 400, 400], None),
+                ('phase2-ko', '20:07:00', [1, 1, 1, 1], [0, 400, 400, 400], [True, False, False, False]),
+                ('phase2-revived', '20:08:00', [1, 1, 1, 1], [100, 400, 400, 400], None),
+            ]
+            for name, clock, kills, health, ready in checkpoints:
+                data = snapshot(f'2026-09-28T{clock}+00:00', kills, health, ready)
+                (run / f'combat-{name}.json').write_text(json.dumps(data), encoding='utf-8')
+            inputs = []
+            for slot in range(4):
+                inputs.append({'StartedAt': f'2026-09-28T20:0{slot}:20+00:00',
+                               'UpAcknowledgedAt': f'2026-09-28T20:0{slot}:21+00:00',
+                               'Instance': slot, 'Pid': pids[slot], 'Completed': True, 'Error': None,
+                               'Mouse': {'Buttons': 1},
+                               'NativeInput': [{'local_user': slot, 'pid': pids[slot]}]})
+            inputs.append({'StartedAt': '2026-09-28T20:07:20+00:00',
+                           'UpAcknowledgedAt': '2026-09-28T20:07:21+00:00',
+                           'Instance': 1, 'Pid': pids[1], 'Completed': True, 'Error': None,
+                           'ScanCode': 18, 'NativeInput': [{'local_user': 1, 'pid': pids[1]}]})
+            (run / 'gameplay-input.jsonl').write_text(
+                '\n'.join(json.dumps(row) for row in inputs), encoding='utf-8')
+            result = analyze_phase2_combat(run, 4, pids)
+            self.assertTrue(result['verified'])
+            self.assertEqual(result['kill_slots'], [0, 1, 2, 3])
+            self.assertEqual(result['damaged_slots'], [0])
+            self.assertEqual(result['ko_slots'], [0])
+            self.assertEqual(result['revived_slots'], [0])
+            inputs[-1]['NativeInput'] = []
+            (run / 'gameplay-input.jsonl').write_text(
+                '\n'.join(json.dumps(row) for row in inputs), encoding='utf-8')
+            self.assertFalse(analyze_phase2_combat(run, 4, pids)['verified'])
+
+    def test_local_control_requires_owned_inputs_and_every_peer_to_observe_each_move(self):
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            pids = [101, 102, 103, 104]
+            before = []
+            after = []
+            for observer, pid in enumerate(pids):
+                before.append({'pid': pid, 'captured_at': '2026-09-28T20:00:00+00:00', 'actors': [
+                    {'slot': slot, 'user': slot, 'remote_enabled': 0 if slot == observer else 1,
+                     'position': [float(slot), 0.0, 0.0],
+                     'hidden': False, 'render_hidden': False} for slot in range(4)]})
+                after.append({'pid': pid, 'captured_at': '2026-09-28T20:01:00+00:00', 'actors': [
+                    {'slot': slot, 'user': slot, 'remote_enabled': 0 if slot == observer else 1,
+                     'position': [float(slot), 0.0, 1.0],
+                     'hidden': False, 'render_hidden': False} for slot in range(4)]})
+            (run / 'campaign-players.1.json').write_text(json.dumps(before), encoding='utf-8')
+            (run / 'campaign-players.2.json').write_text(json.dumps(after), encoding='utf-8')
+            records = []
+            for instance, pid in enumerate(pids):
+                records.append(json.dumps({
+                    'StartedAt': f'2026-09-28T20:00:{10 + instance:02d}+00:00',
+                    'Instance': instance, 'Pid': pid, 'ScanCode': 17, 'Completed': True, 'Error': None,
+                    'UpAcknowledgedAt': f'2026-09-28T20:00:{11 + instance:02d}+00:00',
+                    'NativeInput': [{'local_user': instance, 'pid': pid,
+                                     'actor': '0x1234', 'scene': '0x5678'}],
+                }))
+            (run / 'gameplay-input.jsonl').write_text('\n'.join(records), encoding='utf-8')
+            result = analyze_local_control(run, 4, pids)
+            self.assertTrue(result['verified'])
+            self.assertEqual(result['replicated_slots'], [0, 1, 2, 3])
+            after[2]['actors'][3]['position'] = [3.0, 0.0, 0.1]
+            (run / 'campaign-players.2.json').write_text(json.dumps(after), encoding='utf-8')
+            result = analyze_local_control(run, 4, pids)
+            self.assertFalse(result['verified'])
+            self.assertEqual(result['replicated_slots'], [0, 1, 2])
+
+    def test_transition_control_requires_shared_load_and_owned_post_load_movement(self):
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            pids = [201, 202, 203, 204]
+            def snapshot(captured_at, offset, movement=0.0):
+                return [{'pid': pid, 'captured_at': captured_at, 'actors': [
+                    {'slot': slot, 'user': slot, 'remote_enabled': 0 if slot == observer else 1,
+                     'position': [offset + float(slot), 0.0, movement],
+                     'hidden': False, 'render_hidden': False} for slot in range(4)]}
+                    for observer, pid in enumerate(pids)]
+            (run / 'transition-before.json').write_text(
+                json.dumps(snapshot('2026-09-28T20:00:00+00:00', 0.0)), encoding='utf-8')
+            (run / 'transition-after-arrival.json').write_text(
+                json.dumps(snapshot('2026-09-28T20:01:00+00:00', 100.0)), encoding='utf-8')
+            (run / 'transition-after-control.json').write_text(
+                json.dumps(snapshot('2026-09-28T20:02:00+00:00', 100.0, 1.0)), encoding='utf-8')
+            records = [json.dumps({
+                'StartedAt': f'2026-09-28T20:01:{10 + instance:02d}+00:00',
+                'Instance': instance, 'Pid': pid, 'ScanCode': 17, 'Completed': True, 'Error': None,
+                'UpAcknowledgedAt': f'2026-09-28T20:01:{11 + instance:02d}+00:00',
+                'NativeInput': [{'local_user': instance, 'pid': pid,
+                                 'actor': '0x1234', 'scene': '0x5678'}],
+            }) for instance, pid in enumerate(pids)]
+            (run / 'gameplay-input.jsonl').write_text('\n'.join(records), encoding='utf-8')
+            result = analyze_transition_control(run, 4, pids)
+            self.assertTrue(result['verified'])
+            self.assertEqual(result['transitioned_slots'], [0, 1, 2, 3])
+            self.assertEqual(result['controlled_slots'], [0, 1, 2, 3])
+            controlled = json.loads((run / 'transition-after-control.json').read_text(encoding='utf-8'))
+            controlled[1]['actors'][2]['position'][2] = 0.1
+            (run / 'transition-after-control.json').write_text(json.dumps(controlled), encoding='utf-8')
+            self.assertFalse(analyze_transition_control(run, 4, pids)['verified'])
+
+    def test_desync_and_queue_abort_are_failures_without_an_exit_record(self):
+        for marker in ('native desync assert: caller=004BC96A expression=inventory mismatch',
+                       'jip broadcast queue: FAILED reason=capacity',
+                       'pause acknowledgement: FAILED context'):
+            with self.subTest(marker=marker):
+                result = scan_log(['20:00:00.000 [1] ' + marker], 1, 4)
+                self.assertEqual(result['network_status'], 'failed')
+                self.assertEqual(len(result['faults']), 1)
+
+    def test_shutdown_subtype_is_separate_from_quit_reason(self):
+        row = ('20:00:00.125 [12] native connection failure: client=1234abcd '
+               'recipient=0110000170000003 flag=0 reason=6')
+        result = scan_native_teardown([row.replace('flag=0', 'flag=2')] + [row] * 40)
+        self.assertEqual(len(result['shutdown_events']), 32)
+        self.assertEqual(result['shutdown_events'][0], {
+            'line': 2, 'timestamp': '20:00:00.125', 'client': '1234ABCD',
+            'recipient': '0110000170000003', 'flag': 0, 'reason': 6})
+        self.assertEqual(result['quit_requests'], [])
+        self.assertNotIn('disconnect_cause', result)
+
+    def test_assert_evidence_is_bounded_and_not_executed(self):
+        row = ('20:00:00.125 [12] native desync assert: caller=00451234 '
+               'expression=users == expected file=engine/source.cpp line=123 thread=12')
+        result = scan_native_teardown([row.replace('line=123', 'line=bad'),
+                                      row.replace('users == expected', 'x' * 321)] + [row] * 40)
+        self.assertEqual(len(result['desync_asserts']), 32)
+        self.assertEqual(result['desync_asserts'][0], {
+            'line': 3, 'timestamp': '20:00:00.125', 'caller': '00451234',
+            'expression': 'users == expected', 'file': 'engine/source.cpp',
+            'source_line': 123, 'thread': 12})
+        self.assertNotIn('gameplay_verified', result)
+
+    def test_native_quit_reason_is_raw_bounded_evidence(self):
+        row = ('20:00:00.125 [12] native quit request: object=1234abcd caller=00401234 '
+               'reason=14 stage=3 previousReason=15 deferredReason=-1 thread=12')
+        result = scan_native_teardown([row.replace('reason=14', 'reason=unknown')] + [row] * 40)
+        self.assertEqual(len(result['quit_requests']), 32)
+        self.assertEqual(result['quit_requests'][0], {
+            'line': 2, 'timestamp': '20:00:00.125', 'object': '1234ABCD', 'caller': '00401234',
+            'reason': 14, 'stage': 3, 'previous_reason': 15, 'deferred_reason': -1, 'thread': 12})
+        self.assertEqual(result['calls'], [])
+        self.assertNotIn('disconnect_cause', result)
+
     def test_teardown_absence_is_not_stability_evidence(self):
         result = scan_native_teardown([])
         self.assertFalse(result['installed'])
@@ -41,7 +205,8 @@ class HarnessEvidenceTests(unittest.TestCase):
         self.assertEqual(result['calls'][0]['line'], 4)
 
     def test_teardown_distinguishes_topology_event_request_and_cleanup(self):
-        operations = ['server-event-16', 'client-event-16', 'server-down-request', 'client-shutdown']
+        operations = ['server-handle-quit', 'server-event-16', 'client-event-16',
+                      'server-down-request', 'client-shutdown']
         rows = [f'20:00:00.125 [12] native teardown: call={i+1} operation={operation} '
                 'object=1234ABCD caller=00870001 thread=12 stackHints='
                 for i, operation in enumerate(operations)]

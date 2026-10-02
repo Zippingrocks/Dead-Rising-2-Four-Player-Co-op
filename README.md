@@ -1,27 +1,28 @@
 # Dead Rising 2 Four-Player Co-op
 
 Experimental native campaign co-op research for Dead Rising 2 PC. The intended mod will let players choose
-solo, standard two-player co-op, or four-player co-op. **This is not a playable release yet.**
+solo, standard two-player co-op, or four-player co-op. **Local four-player campaign gameplay is now proven,
+but this is not a public release yet.**
 
 ## Current Status
 
-All-client world-application checkpoint: `four_instance_20260927_191316`.
+Latest visual-identity checkpoint: `four_instance_20261001_175129`.
 
-- Four hidden, muted local instances establish native membership and a connection mesh through a local Steam shim.
-- The game activates four human actor slots; separate clothing storage avoids the earlier allocation crashes.
-- All three remote clients now receive and natively apply the campaign world data.
-- All four instances render the safehouse, but the remote clients lose their host connection after loading.
-- Stable four-player campaign play, independent input/replication, remote Steam sessions, and the mode selector
-  are not verified or finished. A connected lobby or rendered room is not a gameplay pass.
+- Four local instances complete native frontend admission, retain a connected four-way mesh, and activate four
+  independently owned campaign actors in the same room.
+- Private keyboard, mouse, camera, and focused-window controller routing let each owner move independently.
+- Four-way movement replication, inventory transfer, pause/resume, a native shared area transition, and retained
+  post-transition control have passed bounded watched tests.
+- Separate clothing storage prevents the original Players 3/4 allocation crash. Actor-local wardrobe calls now
+  preserve Players 1/2, give Player 3 a full TIR suit, and give Player 4 a yellow TIR jacket; the four-instance
+  visual test passed and all temporary content was restored.
+- Attributable four-owner combat, damage, KO/revive, complete partner HUD behavior, campaign-wide scripting,
+  production Steam sessions, and the solo/2P/4P selector remain unfinished.
 
-Latest diagnostic controls preserve the two-player path (`201427`) and expose an incomplete four-player
-frontend join (`202025`). The latter never reaches world application; it is not a disconnect fix. Bounded
-native teardown tracing and stricter per-client lobby evidence are now available.
-
-**Next target:** verify each frontend admission before advancing, then trace the first native disconnect while
-preserving the proven data-transfer behavior. See [disconnect investigation](4-player-coop/docs/native-teardown-investigation.md),
+**Next target:** complete the formal combat and revive gate without regressing the proven transition/control path,
+then validate production Steam behavior and package the user-selectable mode. See
 [current state](4-player-coop/docs/current-state.md),
-[world transition](4-player-coop/docs/world-transition-hold.md), and
+[gameplay validation](4-player-coop/docs/four-player-gameplay-validation.md), and
 [network-file ownership](4-player-coop/docs/nfs-multi-client-ownership.md).
 
 ## Repository Layout
@@ -57,7 +58,8 @@ dotnet build tools/dr2-crash-dump-monitor/DR2CrashDumpMonitor.csproj -c Release
 
 The native scripts default to VS 2022 Community. Pass `-VcVarsPath` pointing to your installation's
 `VC/Auxiliary/Build/vcvars32.bat` for another edition or location. Building does **not** install the DLL or start DR2.
-The Python suite has 77 tests and the native suite has seven executable fixtures at this checkpoint.
+The Python suite has 173 tests, the native suite has 11 executable fixtures, and the Node dump parser has two
+regression tests at this checkpoint.
 Optional reverse-engineering tools use `python -m pip install -r requirements-research.txt` and locally supplied
 images/symbols; neither the proprietary inputs nor their generated symbol tables are included.
 

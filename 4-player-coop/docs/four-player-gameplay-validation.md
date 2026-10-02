@@ -403,11 +403,180 @@ and replicated across peers: players 1-3 moved materially from the admission
 cluster, while the host also accepted local input. This establishes local
 four-player campaign control evidence in the safehouse.
 
-The automatic report still marks `four_player_campaign_verified=false` because it
-does not yet fold the manual post-admission movement snapshot into that aggregate
-field. Treat the individual evidence above as the current gameplay result. Combat,
-damage, revive/down states, complete partner HUDs, another shared area transition,
+### Phase 1 Shared Transition And Retained Control
+
+Run `four_instance_20260928_144959` converts the earlier manual evidence into a
+repeatable automatic verdict. Stable `local-control-before.json` and
+`local-control-after.json` checkpoints bracket owned movement from all four
+instances. Every slot moved at least 0.4 units in every observer, while the
+reporter's 10-unit ceiling prevents a level load from being mistaken for local
+movement. Exact input acknowledgements are accepted only when accompanied by
+matching raw native-input ownership or a matching waypoint trace containing the
+same PID, local user, scene, and actor.
+
+The party then traversed the native safehouse vent. The three transition
+checkpoints show every visible slot moving about 355-358 world units into the
+loaded destination. After arrival, P1-P4 independently moved about 1.8-2.4 units;
+all four movements were observed by every process with correct local/remote actor
+ownership. The final report records:
+
+- `four_player_local_control_verified=true`
+- `four_player_post_transition_control_verified=true`
+- `four_player_campaign_verified=true`
+
+The final aggregate means the defined Phase 1 admission/control/transition gate,
+not complete campaign gameplay. The 20-minute observation completed without an
+early process exit, peak private memory was about 2.97 GiB, and cleanup restored
+the baseline DLL, original save, render settings, and nine staged archives with
+11/11 checks passing. The Python regression suite now contains 120 passing tests.
+Combat, damage, revive/down states, complete partner HUDs, campaign scripting,
 production Steam sessions, and the user-facing solo/2P/4P selector remain open.
+
+### Phase 2 Combat Observer And Transition Control
+
+The Phase 2 observer is deliberately read-only. PC executable matches establish
+`cHumanStatusInfo` at actor +D82C, status actor/user fields at +4408/+440C,
+`mIsReadyToRevive` at +4410, `mRevivalTimePercent` at +4414, replicated status
+health at +9C0, and maximum health at +447C. Locally authoritative campaign data
+comes from `00DDE9A8` -> +08: health at +2C and zombie kills at +38. The exact PC
+kill increment is `0084897F`; revival consumers at `004BEE71`, `004BEE92`, and
+`0081E726` corroborate the status fields. The sampler rejects unsupported code,
+invalid ownership, non-finite health, and unstable scene/table ownership.
+
+`snapshot-harness-combat.ps1` captures all four processes into one checkpoint.
+`compare_campaign_combat.py` reports per-owner kill deltas, health changes only
+when all observers agree, and separate KO and revive transitions. It cannot turn
+input alone into combat evidence: an owned attack must occur between snapshots,
+and stable post-hit state must be visible to every observer.
+
+Run `four_instance_20260928_152832` exercised this observer during a real shared
+transition. Baseline local kill counts were P1=4 and P2/P3/P4=0; every observer
+reported all four players at 400/400 effective health with no KO-ready slot. All
+four owners then traversed the bathroom door and staged at `door_vent` through
+ordinary private movement. Host E interaction moved the party from approximately
+(-8,38) to approximately (-306,-155) in the main safehouse. The post-transition
+combat snapshot again reports zero kill deltas, no damage or KO transition, and
+four-way health agreement at 400/400. This is a clean negative control and proves
+the observer remains coherent through the load; it is not a combat pass.
+
+The 1800-second observation completed normally. All four processes remained alive,
+native endpoints stayed connected, no runtime access violation or native teardown
+call was recorded, and peak private memory was approximately 3,012.6 MiB. Final
+cleanup restored the baseline DLL, original save, render settings, and all nine
+temporarily staged stock archives; no DR2 process remained.
+
+Inventory values changed from 168/167/166/164 before the vent to
+16388/16387/16386/16384 afterward. Because the delta is consistently 0x3F5C for
+these four values, it is preserved as an unresolved scene/item representation
+change rather than normalized speculatively. Phase 2 combat acceptance remains:
+one attributable zombie kill from each owner, replicated damage observed by all
+four processes, then a genuine KO and ordinary teammate revive with separate
+before/after checkpoints.
+
+`report_harness.py` now enforces that sequence through `analyze_phase2_combat`.
+The expected files are `combat-phase2-baseline.json`, four ordered
+`combat-phase2-after-player-N-kill.json` checkpoints, then
+`combat-phase2-damage-before.json`, `combat-phase2-damage-after.json`,
+`combat-phase2-ko.json`, and `combat-phase2-revived.json`. Each kill interval must
+contain an acknowledged, natively observed left-button attack owned by that player.
+The revive interval must contain an acknowledged, natively observed E press from
+a different player than the downed slot. The aggregate cannot pass on kill counters
+or health values alone, and the current transition-control run correctly remains
+`four_player_phase2_combat_verified=false` because those live checkpoints do not
+exist yet.
+
+### Pre-ProcessFlow Stall Classifier
+
+Use `analyze_transition_stall.py <run>` when a shared level transition appears to
+hang before combat testing. The analyzer infers the latest completed host E press
+from `gameplay-input.jsonl` and correlates it with host native-update progress,
+post-trigger ProcessFlow calls, the three client endpoint/reliable/listener state
+changes, and `threads-transition-stall.0.json`.
+
+The positive signature means the host game thread entered the known asynchronous
+loader wait and stopped servicing native updates before ProcessFlow, followed by
+near-simultaneous client timeouts. It does not declare that any individual asset,
+job, lock, or archive caused the loader to wait. A missing thread capture, moving
+native-update counter, post-trigger ProcessFlow callback, or incomplete client
+timeout triplet returns `not-proven`.
+
+For the targeted rerun, pass `-LoaderWaitProbe` to `test-four-instances.ps1` (or
+the same switch to `run-teardown-control.ps1`). This adds
+`-cooploaderwaitprobe` to each owned child. The runtime validates and intercepts
+only the existing maintenance call at `009E7D58`, samples the event `+0x10`
+completion byte and scheduler queue state once per second, and then calls the
+original function. The probe is observational: it does not signal the event,
+change queue depth, service networking from another thread, or alter a timeout.
+
+Run `four_instance_20260928_162320` is the first positive fixture: final update
+count 53037 remained unchanged for 266,411 ms, all client host endpoints reached
+state 8 within 197 ms, and the host update thread contained all three wait-return
+addresses. The reporter stores the result as `transition_stall_analysis`; it does
+not satisfy transition control or Phase 2 combat acceptance.
+
+### Post-Transition Host Update Stall
+
+Corrected run `four_instance_20260928_172024` entered and returned from
+ProcessFlow, placed all four actors in the main safehouse around (-306,-155), and
+verified separate retained control for every owner. The host later stopped
+advancing `nativeUpdateCalls` at 51150 while approaching the combat area. Its last
+ordinary packet activity was around 17:35:46; Players 2-4 then emitted native
+connection failure reason 3 at 17:35:51-17:35:58, followed by host teardown.
+There was no loader-wait probe activity during this interval. This is a new
+post-transition host update-thread stall, not a failed vent load and not evidence
+that a longer network timeout would fix the underlying fault.
+
+Use `-NativeUpdateStallSnapshots` for the targeted reproduction. The watcher
+starts at the host log's current end after admission, requires a nonzero native
+update thread and a repeated call count for at least 750 ms, then invokes the
+existing thread-only crash-monitor capture. It records
+`threads-native-update-stall.0.json` and a `.watch.json` sidecar. Historical
+startup pauses cannot trigger it, and unique run directories plus overwrite
+refusal preserve evidence provenance. Until the captured stack identifies the
+blocked call path, do not extend timeouts, synthesize traffic, or claim Phase 2
+combat readiness.
+
+Run `four_instance_20260928_175009` also showed that the old simultaneous capture
+immediately after final admission can crash all four D3D9 devices with
+`Device is still lost. Free all resources.` The stall-snapshot control now omits
+only that frame readback. Run `four_instance_20260928_195524` passed the former
+crash point, but Players 2 and 3 settled together in a safehouse collision pocket
+and remained pinned despite acknowledged native controls; host and Player 4 still
+moved normally. The host vent action correctly refused to transition without them.
+
+Use `-SeparateConfirmedJoiners` on the next reproduction. It waits for every confirmed
+owner to leave single-player mode, then disperses P4, P3, and P2 with recorded private
+input rather than position writes. Gate the vent route on four
+distinct movable owner positions; a collision-pinned client is not a control pass.
+
+Run `four_instance_20261001_141156` passed that control. It admitted and activated
+all four owners before reverse-order separation, routed all four through the native
+vent, and captured synchronized `transition-before`, `transition-after-arrival`, and
+`transition-after-control` snapshots. Every observer saw every slot cross the load
+boundary by approximately 355-359 units. Separate post-load input moved P1-P4 by
+approximately 1.9-2.4 units, and the formal transition-control verdict is true.
+
+With `-NativeUpdateStallSnapshots` armed, the host continued from the old 51150
+failure point to native update count 91648. The final plateau was 0 ms, the watcher
+completed by timeout without a stall capture, and no client lost the host. Therefore
+the prior freeze was not reproduced in this activation-before-separation control.
+This is strong regression evidence, not proof that admission order is the only
+possible cause. The observation ended normally and all staged state was restored.
+
+The run did not create the separate pre-transition local-control checkpoint pair,
+so its aggregate campaign flag remains false even though its shared transition
+sub-gate is formally true. Future waypoint pulses include native input-owner samples
+in addition to camera, actor, PID, scene, acknowledgement, and replicated-position
+evidence.
+
+### Independent Player Appearance
+
+Run `four_instance_20261001_175129` validated independent wardrobe targeting after native admission. The guarded
+game-thread dispatcher resolved live outfit table entry 5 for Player 3's TIR helmet, torso/legs, gloves, boots,
+and overlay, plus entry 151 for Player 4's yellow TIR chest. Players 1 and 2 were absent from the target table and
+retained their established appearances. The exposed four-window test was user-confirmed, all four processes stayed
+alive until intentional shutdown, and cleanup restored every temporarily staged archive. This is a local harness
+visual-identity pass; remote production-Steam replication remains a separate gate.
 
 ### Acceptance Gates
 
