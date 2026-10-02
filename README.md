@@ -22,9 +22,11 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
   `dr2_4p_protocol=1` Steam lobby filter, advertises the same tag on hosted lobbies, forces a four-member limit,
   publishes it per member, and rejects incompatible outgoing or incoming joins. Vanilla menus are unchanged. Remote
   Steam behavior still needs live validation.
+- An alpha release builder now produces a hash-manifested ZIP with guarded install/update/uninstall scripts. Existing
+  `dinput8.dll` and config files are backed up and restored, while unexpected post-install DLL changes are left alone.
 
 **Next target:** complete the formal combat and revive gate without regressing the proven transition/control path,
-then validate production Steam behavior and package the user-selectable mode. See
+then validate the production Steam session and protocol filter across the remote test group. See
 [current state](4-player-coop/docs/current-state.md),
 [gameplay validation](4-player-coop/docs/four-player-gameplay-validation.md), and
 [network-file ownership](4-player-coop/docs/nfs-multi-client-ownership.md).
@@ -56,7 +58,9 @@ python -m unittest discover -s 4-player-coop/tools -p 'test_*.py'
 node --test 4-player-coop/tools/test_hang_dump.mjs
 ./4-player-coop/tools/test-native-abi.ps1
 ./4-player-coop/tools/test-content-swap.ps1
+./4-player-coop/tools/test-release-installer.ps1
 ./tools/case-zero-runtime/build.ps1
+./4-player-coop/tools/build-release.ps1
 dotnet build tools/dr2-crash-dump-monitor/DR2CrashDumpMonitor.csproj -c Release
 ```
 
@@ -75,3 +79,14 @@ CI runs offline checks only: no game launches, Steam login, proprietary assets, 
 
 Keep game archives, executables, symbols, saves, captures, dumps, credentials, and generated builds out of Git.
 Historical run names and hashes in the research docs identify local evidence, not files shipped by this repository.
+
+## Alpha Distribution
+
+`build-release.ps1` compiles the x86 proxy and writes an ignored, redistributable ZIP under
+`4-player-coop/builds/releases/`. The ZIP contains only the mod DLL, marker config, manifest, instructions, and
+installer/uninstaller; it never contains the game executable, archives, saves, symbols, or other Capcom content.
+
+Each tester extracts the same ZIP and runs `Install-DR2FourPlayerCoop.cmd` while the game is closed. Everyone then
+uses the stock co-op menus. The exact protocol filter keeps this alpha pool separate from vanilla DR2 and incompatible
+mod builds, subject to the pending real-Steam validation. `Uninstall-DR2FourPlayerCoop.cmd` reverses the installation
+and restores a proxy/config that existed before the mod.
