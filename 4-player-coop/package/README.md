@@ -1,29 +1,28 @@
 # Dead Rising 2 Four-Player Co-op - Alpha Test
 
 This package enables the experimental four-player campaign runtime for the Steam PC version of Dead Rising 2.
-It does not contain Capcom game files. Every participant must own the game and install the exact same mod release.
+It does not contain Capcom game files. Every participant must own the game and use this exact mod release.
 
-## Install
+## Drag-And-Drop Install
 
 1. Close every Dead Rising 2 instance.
-2. Extract the entire ZIP to a normal folder.
-3. Run `Install-DR2FourPlayerCoop.cmd`.
+2. In Steam, open Dead Rising 2's Properties, select Installed Files, then Browse.
+3. Open the ZIP and drag `dinput8.dll` and `four_player_coop.ini` beside `deadrising2.exe`.
 4. Start Dead Rising 2 normally through Steam.
 5. Use the stock `JOIN CO-OP GAME` flow. There is no extra menu button.
 
-The installer checks the package hashes and game folder. If another mod already owns `dinput8.dll`, it backs that
-file up before installing. It records the exact installed hashes so a later update or uninstall cannot silently delete
-an unrelated change.
+The release manifest contains SHA-256 hashes for both mod files. Do not combine this alpha with another mod that also
+uses `dinput8.dll`; Windows can load only one file with that name from the game directory.
 
 This build searches only for lobbies advertising its exact `dr2_4p_protocol` value. Vanilla or incompatible modded
 lobbies should not be returned, and incompatible peers should be rejected. Remote Steam behavior is still alpha and
 must be validated by the test group.
 
-## Uninstall
+## Remove Or Reset
 
-Close the game and run `Uninstall-DR2FourPlayerCoop.cmd` from the same extracted release folder. The uninstaller
-removes this release and restores the `dinput8.dll` and config that existed before installation, if any. It refuses
-to delete `dinput8.dll` when another program or manual update changed that file after installation.
+Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
+Integrity feature can repair official game files, but it normally does not remove extra mod files, so delete these two
+files first if you want the mod completely gone.
 
 ## Test Group Rules
 

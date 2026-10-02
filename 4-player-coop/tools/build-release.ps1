@@ -34,27 +34,20 @@ if (Test-Path -LiteralPath $staging) {
     }
     Remove-Item -LiteralPath $resolvedStaging -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $staging "payload") | Out-Null
+New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 $buildScript = Join-Path $repoRoot "tools\case-zero-runtime\build.ps1"
 $builtDll = & $buildScript -OutputDir $runtimeOutput -VcVarsPath $VcVarsPath | Select-Object -Last 1
 if (-not (Test-Path -LiteralPath $builtDll)) { throw "Runtime build did not produce dinput8.dll." }
 
-foreach ($name in @(
-    "README.md",
-    "VERSION",
-    "Install-DR2FourPlayerCoop.ps1",
-    "Install-DR2FourPlayerCoop.cmd",
-    "Uninstall-DR2FourPlayerCoop.ps1",
-    "Uninstall-DR2FourPlayerCoop.cmd"
-)) {
+foreach ($name in @("README.md", "VERSION")) {
     Copy-Item -LiteralPath (Join-Path $packageSource $name) -Destination (Join-Path $staging $name)
 }
-Copy-Item -LiteralPath $builtDll -Destination (Join-Path $staging "payload\dinput8.dll")
-Copy-Item -LiteralPath (Join-Path $packageSource "four_player_coop.ini") -Destination (Join-Path $staging "payload\four_player_coop.ini")
+Copy-Item -LiteralPath $builtDll -Destination (Join-Path $staging "dinput8.dll")
+Copy-Item -LiteralPath (Join-Path $packageSource "four_player_coop.ini") -Destination (Join-Path $staging "four_player_coop.ini")
 
-$dllHash = (Get-FileHash -LiteralPath (Join-Path $staging "payload\dinput8.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
-$configHash = (Get-FileHash -LiteralPath (Join-Path $staging "payload\four_player_coop.ini") -Algorithm SHA256).Hash.ToUpperInvariant()
+$dllHash = (Get-FileHash -LiteralPath (Join-Path $staging "dinput8.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
+$configHash = (Get-FileHash -LiteralPath (Join-Path $staging "four_player_coop.ini") -Algorithm SHA256).Hash.ToUpperInvariant()
 $manifest = [ordered]@{
     schemaVersion = 1
     name = "Dead Rising 2 Four-Player Co-op"
