@@ -52,6 +52,7 @@ namespace {
 bool g_trace = false;
 bool g_harness = false;
 bool g_production = false;
+bool g_baseGameDlcCompatibility = false;
 void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
@@ -2333,7 +2334,13 @@ const char* const kUserMethods[] = {"GetHSteamUser", "BLoggedOn", "GetSteamID", 
                                     "StartVoiceRecording", "StopVoiceRecording", "GetAvailableVoice", "GetVoice",
                                     "DecompressVoice", "GetVoiceOptimalSampleRate", "GetAuthSessionTicket",
                                     "BeginAuthSession", "EndAuthSession", "CancelAuthTicket", "UserHasLicenseForApp",
-                                    "BIsBehindNAT", "AdvertiseGame", "RequestEncryptedAppTicket", "GetEncryptedAppTicket"};
+                                     "BIsBehindNAT", "AdvertiseGame", "RequestEncryptedAppTicket", "GetEncryptedAppTicket"};
+const char* const kAppsMethods[] = {
+    "BIsSubscribed", "BIsLowViolence", "BIsCybercafe", "BIsVACBanned", "GetCurrentGameLanguage",
+    "GetAvailableGameLanguages", "BIsSubscribedApp", "BIsDlcInstalled", "GetEarliestPurchaseUnixTime",
+    "BIsSubscribedFromFreeWeekend", "GetDLCCount", "BGetDLCDataByIndex", "InstallDLC", "UninstallDLC",
+    "RequestAppProofOfPurchaseKey", "GetCurrentBetaName", "MarkContentCorrupt", "GetInstalledDepots",
+    "GetAppInstallDir", "BIsAppInstalled", "GetAppOwner", "GetLaunchQueryParam", "RegisterActivationCode"};
 const char* const kUtilsMethods[] = {"GetSecondsSinceAppActive", "GetSecondsSinceComputerActive", "GetConnectedUniverse",
                                      "GetServerRealTime", "GetIPCountry", "GetImageSize", "GetImageRGBA", "GetCSERIPPort",
                                      "GetCurrentBatteryPower", "GetAppID", "SetOverlayNotificationPosition",
@@ -2346,6 +2353,7 @@ const char* MethodName(int iface, int slot, char* buffer) {
     case kMatchmaking: table = kMatchmakingMethods; count = _countof(kMatchmakingMethods); break;
     case kNetworking: table = kNetworkingMethods; count = _countof(kNetworkingMethods); break;
     case kUser: table = kUserMethods; count = _countof(kUserMethods); break;
+    case kApps: table = kAppsMethods; count = _countof(kAppsMethods); break;
     case kUtils: table = kUtilsMethods; count = _countof(kUtilsMethods); break;
   }
   if (slot < count) return table[slot];
@@ -2474,6 +2482,29 @@ bool __fastcall Mod_Matchmaking_SetLobbyType(Proxy* proxy, void*, unsigned long 
   Log("production matchmaking: SetLobbyType lobby=%08lX%08lX requestedType=%d effectiveType=%d",
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), type, visibleType);
   return RealMethod<Method_t>(proxy, 33)(proxy->real, lobby, visibleType);
+}
+
+bool __fastcall Mod_Apps_BIsDlcInstalled(Proxy* proxy, void*, unsigned int appId) {
+  using Method_t = bool(__thiscall*)(void*, unsigned int);
+  const bool installed = RealMethod<Method_t>(proxy, coop_matchmaking::kAppsBIsDlcInstalledSlot)(
+      proxy->real, appId);
+  if (!g_baseGameDlcCompatibility || !coop_matchmaking::IsDr2OptionalSkillPack(appId)) return installed;
+  Log("production DLC compatibility: app=%u SteamInstalled=%d effectiveInstalled=0", appId, installed);
+  return false;
+}
+
+bool __fastcall Mod_Apps_BGetDLCDataByIndex(Proxy* proxy, void*, int index, unsigned int* appId,
+                                             bool* available, char* name, int nameBytes) {
+  using Method_t = bool(__thiscall*)(void*, int, unsigned int*, bool*, char*, int);
+  const bool result = RealMethod<Method_t>(proxy, coop_matchmaking::kAppsBGetDlcDataByIndexSlot)(
+      proxy->real, index, appId, available, name, nameBytes);
+  if (!result || !g_baseGameDlcCompatibility || !appId || !available ||
+      !coop_matchmaking::IsDr2OptionalSkillPack(*appId)) return result;
+  const bool steamAvailable = *available;
+  *available = false;
+  Log("production DLC compatibility: index=%d app=%u SteamAvailable=%d effectiveAvailable=0",
+      index, *appId, steamAvailable);
+  return true;
 }
 
 constexpr unsigned long long kLocalSteamIdPrefix = 0x0110000100000000ULL;
@@ -3151,7 +3182,8 @@ void* Wrap(void* real, int iface) {
   if (!real) return real;
   if (g_production && iface == kMatchmaking) InterlockedExchangePointer(&g_productionMatchmaking, real);
   if (g_production && iface == kFriends) InterlockedExchangePointer(&g_productionFriends, real);
-  if (!g_trace && !g_harness && !(g_production && iface == kMatchmaking)) return real;
+  if (!g_trace && !g_harness &&
+      !(g_production && (iface == kMatchmaking || (iface == kApps && g_baseGameDlcCompatibility)))) return real;
   EnterCriticalSection(&g_lock);
   for (int i = 0; i < g_proxyCount; i++) {
     if (g_proxies[i].real == real) {
@@ -5287,6 +5319,8 @@ void Initialize(const wchar_t* root) {
   swprintf(productionIni, MAX_PATH, L"%sfour_player_coop.ini", root);
   g_production = !g_harness && GetFileAttributesW(productionIni) != INVALID_FILE_ATTRIBUTES &&
       GetPrivateProfileIntW(L"FourPlayerCoop", L"Enabled", 1, productionIni) != 0;
+  g_baseGameDlcCompatibility = g_production &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"BaseGameDlcCompatibility", 1, productionIni) != 0;
   g_silent = g_harness && wcsstr(commandLine, L"-coopsilent") != nullptr;
   g_isolatedDesktop = g_harness && wcsstr(commandLine, L"-coopdesktop") != nullptr;
   g_instance = ArgumentInt(commandLine, L"-coopinstance=", 0);
@@ -5382,6 +5416,12 @@ void Initialize(const wchar_t* root) {
     g_thunkTables[kMatchmaking][20] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyData);
     g_thunkTables[kMatchmaking][31] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyMemberLimit);
     g_thunkTables[kMatchmaking][33] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyType);
+    if (g_baseGameDlcCompatibility)
+      g_thunkTables[kApps][coop_matchmaking::kAppsBIsDlcInstalledSlot] =
+          reinterpret_cast<void*>(Mod_Apps_BIsDlcInstalled);
+    if (g_baseGameDlcCompatibility)
+      g_thunkTables[kApps][coop_matchmaking::kAppsBGetDlcDataByIndexSlot] =
+          reinterpret_cast<void*>(Mod_Apps_BGetDLCDataByIndex);
   }
   wchar_t logPath[MAX_PATH];
   if (g_instance > 0) swprintf(logPath, MAX_PATH, L"%scoop_net.%d.log", root, g_instance);

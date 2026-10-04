@@ -45,6 +45,12 @@ same protocol marker through Steam rich presence. The host accepts a pending pee
 and that peer supplies matching member metadata or matching rich-presence proof. Explicitly incompatible peers and
 requests outside a tagged lobby remain rejected.
 
+Alpha 8 fixes the stock `required DLC` rejection seen after Alpha 7 authenticated all three remote peers. DR2 compares
+optional skill-pack ownership during its native join handshake, so players with different combinations cannot connect.
+With `BaseGameDlcCompatibility=1` (the package default), four-player mode reports the Ninja, Psychopath, Soldier of
+Fortune, and Sports Fan skill packs unavailable for that process. This creates a common base-game DLC profile; it does
+not unlock content, remove files, or alter Steam ownership. Alpha 8 uses network protocol `2` and cannot match Alpha 7.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -60,4 +66,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.7`. Network protocol: `1`.
+Current release: `0.1.0-alpha.8`. Network protocol: `2`.

@@ -584,6 +584,19 @@ queries that peer marker when member metadata is not yet available. Admission st
 lobby, and an explicit incompatible member marker remains authoritative. The next remote control must confirm the
 peer's presence marker propagates before or during the repeated native admission requests.
 
+The Alpha 7 remote run verified that rich-presence proof works: all three distinct remote Steam IDs reached the host
+and logged `accepting presence-verified peer` while Steam still reported `listedMember=0`. Native joining then exposed
+DR2's stock DLC compatibility gate. Poki could join either host, while the primary tester and Lacey received the
+required-DLC error when joining one another, which is consistent with asymmetric optional skill-pack ownership. The
+clean PC payload contains package definitions for Steam apps 353050-353053 (Ninja, Psychopath, Soldier of Fortune, and
+Sports Fan), each represented by one bit in DR2's `mDLCFullPackage` handshake field. Alpha 8 moves to protocol `2` and
+defaults to a base-game compatibility profile: its `ISteamApps006` proxy reports only those four optional app IDs as
+unavailable through both direct installation queries and indexed DLC enumeration during the modded process. It never
+reports unowned DLC as owned and delegates every other app query to Steam unchanged. A local smoke test confirmed DR2
+enumerated all four IDs through `BGetDLCDataByIndex`, received `effectiveAvailable=0` for each, and remained responsive.
+The next control must show all clients logging the compatibility policy before joining and must establish whether native
+Player 2 admission now completes.
+
 The active gates after `20261001_141156` are attributable combat for P1-P4,
 replicated damage, genuine KO and teammate revive, a game-authored save/load,
 disconnect/rejoin recovery, broader campaign scripting, production Steam peers,

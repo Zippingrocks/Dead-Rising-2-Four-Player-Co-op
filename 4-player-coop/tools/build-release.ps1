@@ -13,6 +13,7 @@ $buildRoot = Join-Path $repoRoot "4-player-coop\builds"
 if (-not $OutputDir) { $OutputDir = Join-Path $buildRoot "releases" }
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $version = (Get-Content -LiteralPath (Join-Path $packageSource "VERSION") -Raw).Trim()
+$protocol = "2"
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$') {
     throw "Invalid package VERSION: $version"
 }
@@ -53,7 +54,7 @@ $manifest = [ordered]@{
     schemaVersion = 1
     name = "Dead Rising 2 Four-Player Co-op"
     version = $version
-    protocol = "1"
+    protocol = $protocol
     steamAppId = 45740
     architecture = "x86"
     builtAtUtc = [DateTime]::UtcNow.ToString("o")
@@ -70,7 +71,7 @@ Compress-Archive -Path $payloadRoot -DestinationPath $zipPath -CompressionLevel 
 $result = [ordered]@{
     release = $zipPath
     version = $version
-    protocol = "1"
+    protocol = $protocol
     dinput8Sha256 = $dllHash
     zipSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToUpperInvariant()
 }

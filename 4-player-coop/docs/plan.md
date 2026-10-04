@@ -62,9 +62,13 @@ mixer state. Multi-instance tests may run alongside other desktop work only with
 ## Phase 1: mod-only matchmaking (implemented; live Steam validation pending)
 
 - Installing `four_player_coop.ini` enables four-player mode without changing DR2's menus.
-- Searches require the exact Steam lobby metadata `dr2_4p_protocol=1`.
-- Hosts advertise that protocol and a four-member limit. Every modded member publishes the protocol on its lobby-member
-  record; outgoing joins and the host's native incoming admission reject missing or different protocol values.
+- Searches require the exact Steam lobby metadata `dr2_4p_protocol=2`.
+- Hosts advertise that protocol and a four-member limit. Every modded member publishes the protocol through lobby-member
+  metadata and Steam rich presence; outgoing joins and the host's native incoming admission reject missing or different
+  protocol values.
+- Production mode defaults to a common base-game DLC profile by reporting the optional Ninja, Psychopath, Soldier of
+  Fortune, and Sports Fan skill packs unavailable for the lifetime of the modded process. This disables optional
+  entitlements for compatibility; it does not grant content or change Steam ownership.
 - Increment the protocol value whenever a release changes network-visible behavior incompatibly.
 
 ## Phase 2: 4 players in vanilla story co-op

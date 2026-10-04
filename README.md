@@ -19,9 +19,10 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
 - User-supervised local testing passed four-owner combat, replicated damage, KO, and teammate revive behavior.
   Complete partner HUD behavior, campaign-wide scripting, and production Steam session validation remain unfinished.
 - The production runtime is now always four-player when `four_player_coop.ini` is installed. It adds the strict
-  `dr2_4p_protocol=1` Steam lobby filter, advertises the same tag on hosted lobbies, forces a four-member limit,
-  publishes it per member, and rejects incompatible outgoing or incoming joins. Vanilla menus are unchanged. Remote
-  Steam behavior still needs live validation.
+  `dr2_4p_protocol=2` Steam lobby filter, advertises the same tag through lobby metadata and rich presence, forces a
+  four-member limit, and rejects incompatible outgoing or incoming joins. Its default base-game compatibility mode
+  reports the four optional skill packs as disabled during the modded process so differing DLC ownership cannot split
+  the test group. Vanilla menus are unchanged. Remote Steam behavior still needs live validation.
 - An alpha release builder now produces a hash-manifested drag-and-drop ZIP containing one top-level
   `Dead Rising 2` folder. Testers merge that folder into Steam's `steamapps\common` directory without an installer.
 
