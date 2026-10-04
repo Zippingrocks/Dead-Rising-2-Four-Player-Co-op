@@ -3586,7 +3586,8 @@ int PatchImports() {
       const bool byOrdinal = IMAGE_SNAP_BY_ORDINAL32(names->u1.Ordinal);
       const char* importName = byOrdinal ? nullptr : reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData)->Name;
       for (auto& hook : g_hooks) {
-        if (hook.traceOnly && !g_trace) continue;
+        if (hook.traceOnly && !g_trace &&
+            !(g_production && coop_matchmaking::IsRequiredProductionImport(hook.dll, hook.name))) continue;
         if (_stricmp(dllName, hook.dll) != 0) continue;
         if (hook.name ? (byOrdinal || strcmp(importName, hook.name) != 0) : (!byOrdinal || IMAGE_ORDINAL32(names->u1.Ordinal) != hook.ordinal)) continue;
         void* current = reinterpret_cast<void*>(static_cast<ULONG_PTR>(slots->u1.Function));

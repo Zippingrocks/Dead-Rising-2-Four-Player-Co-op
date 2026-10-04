@@ -11,5 +11,11 @@ int main() {
   assert(!coop_matchmaking::IsCompatible(""));
   assert(!coop_matchmaking::IsCompatible("0"));
   assert(!coop_matchmaking::IsCompatible("2"));
+  assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamMatchmaking"));
+  assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamAPI_RunCallbacks"));
+  assert(!coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamNetworking"));
+  assert(!coop_matchmaking::IsRequiredProductionImport("KERNEL32.dll", "SteamMatchmaking"));
+  assert(!coop_matchmaking::IsRequiredProductionImport(nullptr, "SteamMatchmaking"));
+  assert(!coop_matchmaking::IsRequiredProductionImport("steam_api.dll", nullptr));
   return 0;
 }

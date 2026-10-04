@@ -547,6 +547,20 @@ game state.
 
 ## Next Gates
 
+### Production Steam Alpha 4 checkpoint (2026-10-04)
+
+The first remote Alpha 3 test established that an ordinary second player could sometimes join, but Steam and DR2
+treated the lobby as full immediately afterward. Invite options disappeared, additional clients failed during
+`Verifying game information`, and the host logged rejected peers with no `dr2_4p_protocol` member value. The install
+was independently checked against a clean Steam mirror: all 876 official files matched byte-for-byte, so modified game
+content was ruled out.
+
+The root cause was the import-patching gate: `SteamMatchmaking` and `SteamAPI_RunCallbacks` were classified as trace
+hooks and skipped whenever `Trace=0`, including every normal production launch. Alpha 4 explicitly installs those two
+imports when production mode is active. A local Steam launch confirmed both imports were hooked and the real
+`SteamMatchmaking` interface was proxied. The remaining acceptance gate is a fresh remote test proving that the host
+creates and tags a four-member lobby, retains invite availability after Player 2 joins, and admits Players 3 and 4.
+
 The active gates after `20261001_141156` are attributable combat for P1-P4,
 replicated damage, genuine KO and teammate revive, a game-authored save/load,
 disconnect/rejoin recovery, broader campaign scripting, production Steam peers,

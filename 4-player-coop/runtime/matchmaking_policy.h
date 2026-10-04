@@ -13,4 +13,9 @@ inline bool IsCompatible(const char* value) {
   return value && strcmp(value, kProtocolValue) == 0;
 }
 
+inline bool IsRequiredProductionImport(const char* dll, const char* name) {
+  if (!dll || !name || strcmp(dll, "steam_api.dll") != 0) return false;
+  return strcmp(name, "SteamMatchmaking") == 0 || strcmp(name, "SteamAPI_RunCallbacks") == 0;
+}
+
 }  // namespace coop_matchmaking
