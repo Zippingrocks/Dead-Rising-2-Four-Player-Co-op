@@ -56,6 +56,8 @@ bool g_baseGameDlcCompatibility = false;
 void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
+__declspec(align(8)) volatile LONG64 g_productionPendingPeer = 0;
+volatile LONG g_productionFlowSignalMembers = 2;
 bool g_silent = false;
 bool g_isolatedDesktop = false;
 bool g_directP2PProbe = false;
@@ -112,7 +114,12 @@ typedef void (__thiscall *AllocClientDataFn)(void* server, unsigned int count);
 AllocClientDataFn g_allocClientData = nullptr;
 void* volatile g_clientDataServer = nullptr;
 volatile LONG g_clientDataCount = 0;
+volatile LONG g_clientDataProbeInstalled = 0;
 volatile LONG g_campaignAdmissionCapacityInstalled = 0;
+volatile LONG g_productionEngineCapacityInstalled = 0;
+volatile LONG g_productionLocalServerTraceInstalled = 0;
+volatile LONG g_productionAcceptedClientCount = 0;
+void* volatile g_productionLocalServer = nullptr;
 bool InstallCampaignAdmissionCapacity(BYTE* base);
 typedef void* (__thiscall *StarTopologyHostFn)(void* topology, void* ctorInfo);
 StarTopologyHostFn g_starTopologyHost = nullptr;
@@ -176,6 +183,9 @@ volatile LONG g_nativeOnlineUpdateCalls = 0;
 volatile LONG g_nativeOnlineUpdateThread = 0;
 typedef bool (__thiscall *LocalServerAcceptFn)(void*, void*, void*);
 LocalServerAcceptFn g_localServerAccept = nullptr;
+typedef bool (__thiscall *LocalServerAdmissionCheckFn)(void*, DWORD);
+LocalServerAdmissionCheckFn g_localServerCapacityCheck = nullptr;
+LocalServerAdmissionCheckFn g_localServerSessionCheck = nullptr;
 using CanListenFn = bool(__thiscall*)(void*, const unsigned long long*, const unsigned long long*, const unsigned short*);
 CanListenFn g_canListen = nullptr;
 bool InstallJoinPolicyTrace(BYTE* base);
@@ -184,6 +194,22 @@ volatile LONG g_lobbyFrontendObserverStarted = 0;
 bool StartLobbyFrontendObserver();
 void Log(const char* format, ...);
 bool WriteSlot(void* address, const void* bytes, size_t size);
+
+LONG SetProductionCollectionTarget(LONG target, const char* reason) {
+  if (!g_production || g_requestedPlayers != 4 || target < 2 || target > 4) return -1;
+  auto* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+  auto* onlinePlayers = reinterpret_cast<volatile LONG*>(base + (0x00DDCAB0 - 0x00400000));
+  __try {
+    const LONG previous = InterlockedExchange(onlinePlayers, target);
+    if (previous != target)
+      Log("production engine: collection target %ld->%ld reason=%s", previous, target, reason);
+    return previous;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("production engine: failed to set collection target=%ld reason=%s fault=%08lX",
+        target, reason, GetExceptionCode());
+    return -1;
+  }
+}
 
 void __cdecl TraceLoaderWaitTick(void** returnSlot, BYTE* scheduler) {
   static volatile LONG calls = 0;
@@ -287,13 +313,63 @@ bool HandoffOnlineUpdateToNativeThread() {
 bool __fastcall Hook_LocalServerAccept(void* server, void*, void* client, void* packet) {
   BYTE* object = static_cast<BYTE*>(server);
   BYTE* message = static_cast<BYTE*>(packet);
-  Log("direct host: local Accept enter server=%p client=%p state=%ld busy=%u packet=%p "
+  LONG acceptedBefore = 0;
+  LONG previousTarget = -1;
+  if (g_production) {
+    InterlockedExchangePointer(&g_productionLocalServer, server);
+    acceptedBefore = InterlockedCompareExchange(&g_productionAcceptedClientCount, 0, 0);
+    if (g_requestedPlayers == 4 && acceptedBefore >= 2) {
+      auto* clientSlots = reinterpret_cast<volatile LONG*>(object + 0x48);
+      const LONG oldSlots = InterlockedCompareExchange(clientSlots, 4, 2);
+      if (oldSlots == 2)
+        Log("production admission: repaired live local-server client slots 2->4 server=%p", server);
+    }
+    const LONG target = coop_matchmaking::CollectionTargetForAcceptedClients(acceptedBefore);
+    previousTarget = SetProductionCollectionTarget(target, "host accepted client");
+  }
+  Log("direct host: local Accept enter server=%p client=%p state=%ld busy=%u clientSlots=%ld packet=%p "
       "private=%ld nat=%ld protocol=%ld",
-      server, client, *reinterpret_cast<LONG*>(object + 0x0C), object[0x324], packet,
+      server, client, *reinterpret_cast<LONG*>(object + 0x0C), object[0x324],
+      *reinterpret_cast<LONG*>(object + 0x48), packet,
       *reinterpret_cast<LONG*>(message + 0x80), *reinterpret_cast<LONG*>(message + 0x84),
       *reinterpret_cast<LONG*>(message + 0x88));
   const bool result = g_localServerAccept(server, client, packet);
+  if (g_production) {
+    if (result) {
+      const LONG accepted = InterlockedIncrement(&g_productionAcceptedClientCount);
+      if (accepted > 4) InterlockedExchange(&g_productionAcceptedClientCount, 4);
+      Log("production admission: host accepted client ordinal=%ld collectionTarget=%ld busy=%u",
+          accepted > 4 ? 4 : accepted, coop_matchmaking::CollectionTargetForAcceptedClients(acceptedBefore),
+          object[0x324]);
+    } else if (previousTarget >= 2 && previousTarget <= 4) {
+      SetProductionCollectionTarget(previousTarget, "host accept failed");
+    }
+  }
   Log("direct host: local Accept result=%d server=%p client=%p", result, server, client);
+  return result;
+}
+
+bool __fastcall Hook_LocalServerCapacityCheck(void* server, void*, DWORD incomingCount) {
+  const bool result = g_localServerCapacityCheck(server, incomingCount);
+  BYTE* object = static_cast<BYTE*>(server);
+  Log("production admission: capacity check result=%d incoming=%lu groups=%ld/%ld/%ld/%ld slots=%p:%u,%p:%u,%p:%u,%p:%u",
+      result, incomingCount, *reinterpret_cast<LONG*>(object + 0x328),
+      *reinterpret_cast<LONG*>(object + 0x338), *reinterpret_cast<LONG*>(object + 0x348),
+      *reinterpret_cast<LONG*>(object + 0x358), *reinterpret_cast<void**>(object + 0x58), object[0x51],
+      *reinterpret_cast<void**>(object + 0x70), object[0x69],
+      *reinterpret_cast<void**>(object + 0x88), object[0x81],
+      *reinterpret_cast<void**>(object + 0xA0), object[0x99]);
+  return result;
+}
+
+bool __fastcall Hook_LocalServerSessionCheck(void* server, void*, DWORD privateSession) {
+  const bool result = g_localServerSessionCheck(server, privateSession);
+  BYTE* object = static_cast<BYTE*>(server);
+  Log("production admission: session check result=%d private=%lu slots=%p:%u,%p:%u,%p:%u,%p:%u",
+      result, privateSession, *reinterpret_cast<void**>(object + 0x58), object[0x51],
+      *reinterpret_cast<void**>(object + 0x70), object[0x69],
+      *reinterpret_cast<void**>(object + 0x88), object[0x81],
+      *reinterpret_cast<void**>(object + 0xA0), object[0x99]);
   return result;
 }
 
@@ -367,7 +443,65 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
       }
     }
   }
-  const bool result = g_canListen(query, nonce, peer, port);
+  BYTE* queryObject = static_cast<BYTE*>(query);
+  LONG* linkLimit = queryObject ? reinterpret_cast<LONG*>(queryObject + 0xE4) : nullptr;
+  if (g_production && g_requestedPlayers == 4 && linkLimit) {
+    const LONG oldLimit = InterlockedCompareExchange(linkLimit, 3, 1);
+    if (oldLimit == 1) {
+      Log("production admission: repaired live remote-link limit 1->3 query=%p", query);
+    }
+  }
+  LONG occupiedLinks = 0;
+  if (g_production && queryObject) {
+    const size_t offsets[] = {0x94, 0xAC, 0xC4, 0xDC};
+    for (size_t offset : offsets)
+      if (*reinterpret_cast<void**>(queryObject + offset)) occupiedLinks++;
+  }
+  const bool nativeResult = g_canListen(query, nonce, peer, port);
+  bool result = nativeResult;
+  bool full = false;
+  bool duplicate = false;
+  bool connected = false;
+  BYTE localServerBusy = 0xFF;
+  if (g_production && queryObject && nonce && peer && port) {
+    void** table = *reinterpret_cast<void***>(queryObject);
+    using IsFullFn = bool(__thiscall*)(void*);
+    full = reinterpret_cast<IsFullFn>(table[6])(queryObject);
+    duplicate = reinterpret_cast<CanListenFn>(table[2])(queryObject, nonce, peer, port);
+    BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+    connected = reinterpret_cast<bool(__cdecl*)()>(base + (0x0085B140 - 0x00400000))();
+    BYTE* localServer = static_cast<BYTE*>(
+        InterlockedCompareExchangePointer(&g_productionLocalServer, nullptr, nullptr));
+    if (localServer) localServerBusy = localServer[0x324];
+    const LONG acceptedClients = InterlockedCompareExchange(&g_productionAcceptedClientCount, 0, 0);
+    if (linkLimit && coop_matchmaking::ShouldAllowConnectedJoin(
+            nativeResult, connected, full, duplicate, occupiedLinks, *linkLimit,
+            acceptedClients, localServerBusy)) {
+      // Retail forbids new listeners after the first campaign peer reaches gameplay. A four-player
+      // session needs serialized join-in-progress, so bypass only that final predicate after the
+      // protocol, capacity, and duplicate checks above have all succeeded.
+      result = true;
+      Log("production admission: allowed verified join-in-progress peer=%08lX%08lX occupied=%ld limit=%ld "
+          "acceptedClients=%ld busy=%u",
+          static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), occupiedLinks, *linkLimit,
+          acceptedClients, localServerBusy);
+    }
+  }
+  if (g_production && result && peer)
+    InterlockedExchange64(&g_productionPendingPeer, static_cast<LONG64>(*peer));
+  if (g_production && queryObject && nonce && peer && port) {
+    static volatile LONG productionNativeAttempts = 0;
+    const LONG attempt = InterlockedIncrement(&productionNativeAttempts);
+    if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
+      Log("production admission: result peer=%08lX%08lX native=%d effective=%d full=%d duplicate=%d "
+          "connected=%d acceptedClients=%ld busy=%u limit=%ld linkSlots=%p,%p,%p,%p attempt=%ld",
+          static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), nativeResult, result, full, duplicate,
+          connected, InterlockedCompareExchange(&g_productionAcceptedClientCount, 0, 0), localServerBusy,
+          linkLimit ? *linkLimit : -1, *reinterpret_cast<void**>(queryObject + 0x94),
+          *reinterpret_cast<void**>(queryObject + 0xAC), *reinterpret_cast<void**>(queryObject + 0xC4),
+          *reinterpret_cast<void**>(queryObject + 0xDC), attempt);
+    }
+  }
   static volatile LONG diagnosticCalls = 0;
   if (g_meshListenerProbe && InterlockedIncrement(&diagnosticCalls) <= 16) {
     Log("mesh admission: query=%p nonce=%08lX%08lX remoteAddress=%08lX%08lX port=%u accepted=%d",
@@ -380,15 +514,17 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
     BYTE* object = static_cast<BYTE*>(query);
     void** table = *reinterpret_cast<void***>(query);
     using IsFullFn = bool(__thiscall*)(void*);
-    const bool full = reinterpret_cast<IsFullFn>(table[6])(query);
-    const bool duplicate = reinterpret_cast<CanListenFn>(table[2])(query, nonce, peer, port);
-    const bool connected = reinterpret_cast<bool(__cdecl*)()>(0x0085B140)();
-    const int state = static_cast<int>(result) | (full << 1) | (duplicate << 2) | (connected << 3);
+    const bool diagnosticFull = reinterpret_cast<IsFullFn>(table[6])(query);
+    const bool diagnosticDuplicate = reinterpret_cast<CanListenFn>(table[2])(query, nonce, peer, port);
+    const bool diagnosticConnected = reinterpret_cast<bool(__cdecl*)()>(0x0085B140)();
+    const int state = static_cast<int>(result) | (diagnosticFull << 1) |
+        (diagnosticDuplicate << 2) | (diagnosticConnected << 3);
     if (previous[instance] != state) {
       previous[instance] = state;
       Log("join policy: peer=%08lX%08lX query=%p result=%d full=%d duplicate=%d reallyConnected=%d "
           "limit=%ld linkSlots=%p,%p,%p,%p",
-          static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), query, result, full, duplicate, connected,
+          static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), query, result, diagnosticFull,
+          diagnosticDuplicate, diagnosticConnected,
           *reinterpret_cast<LONG*>(object + 0xE4), *reinterpret_cast<void**>(object + 0x94),
           *reinterpret_cast<void**>(object + 0xAC), *reinterpret_cast<void**>(object + 0xC4),
           *reinterpret_cast<void**>(object + 0xDC));
@@ -2435,6 +2571,11 @@ unsigned long long __fastcall Mod_Matchmaking_RequestLobbyList(Proxy* proxy, voi
 unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, int type, int) {
   using Method_t = unsigned long long(__thiscall*)(void*, int, int);
   const int visibleType = coop_matchmaking::VisibleProductionLobbyType(type);
+  InterlockedExchange(&g_productionAcceptedClientCount, 0);
+  InterlockedExchangePointer(&g_productionLocalServer, nullptr);
+  InterlockedExchange64(&g_productionPendingPeer, 0);
+  InterlockedExchange(&g_productionFlowSignalMembers, 2);
+  SetProductionCollectionTarget(2, "new host lobby");
   Log("production matchmaking: CreateLobby requestedType=%d effectiveType=%d limit=%d", type, visibleType,
       coop_matchmaking::kMemberLimit);
   return RealMethod<Method_t>(proxy, 13)(proxy->real, visibleType, coop_matchmaking::kMemberLimit);
@@ -2451,8 +2592,22 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
   }
   Log("production matchmaking: accepted compatible lobby=%08lX%08lX",
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby));
+  InterlockedExchange64(&g_productionPendingPeer, 0);
+  InterlockedExchange(&g_productionFlowSignalMembers, 2);
   InterlockedExchange64(&g_productionLobby, static_cast<LONG64>(lobby));
   return RealMethod<Join_t>(proxy, 14)(proxy->real, lobby);
+}
+
+const char* __fastcall Mod_Friends_GetFriendPersonaName(Proxy* proxy, void*, unsigned long long peer) {
+  using Method_t = const char*(__thiscall*)(void*, unsigned long long);
+  const char* name = RealMethod<Method_t>(proxy, 7)(proxy->real, peer);
+  const unsigned long long pending = static_cast<unsigned long long>(
+      InterlockedCompareExchange64(&g_productionPendingPeer, 0, 0));
+  Log("production identity: persona peer=%08lX%08lX name='%s' pendingPeer=%08lX%08lX acceptedClients=%ld",
+      static_cast<DWORD>(peer >> 32), static_cast<DWORD>(peer), name ? name : "<null>",
+      static_cast<DWORD>(pending >> 32), static_cast<DWORD>(pending),
+      InterlockedCompareExchange(&g_productionAcceptedClientCount, 0, 0));
+  return name;
 }
 
 bool __fastcall Mod_Matchmaking_SetLobbyData(Proxy* proxy, void*, unsigned long long lobby,
@@ -3301,6 +3456,61 @@ void DispatchP2PSessionRequest() {
     if (g_instance == 0) HarnessAcceptAdditionalPeer(source);
   }
 }
+
+bool TrySignalProductionFlowCommand(LONG memberCount) {
+  LONG completed = InterlockedCompareExchange(&g_productionFlowSignalMembers, 0, 0);
+  if (memberCount < completed) {
+    InterlockedExchange(&g_productionFlowSignalMembers, memberCount < 2 ? 2 : memberCount);
+    completed = InterlockedCompareExchange(&g_productionFlowSignalMembers, 0, 0);
+  }
+
+  BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+  BYTE* client = nullptr;
+  BYTE* localNode = nullptr;
+  BYTE* mesh = nullptr;
+  LONG stage = -1;
+  LONG localState = -1;
+  LONG meshState = -1;
+  bool ready = false;
+  __try {
+    BYTE* online = *reinterpret_cast<BYTE**>(base + (0x00E5F428 - 0x00400000));
+    BYTE* p2p = online ? *reinterpret_cast<BYTE**>(online + 0xD8) : nullptr;
+    client = p2p ? *reinterpret_cast<BYTE**>(p2p + 0x38) : nullptr;
+    localNode = client ? *reinterpret_cast<BYTE**>(client + 0x90) : nullptr;
+    mesh = *reinterpret_cast<BYTE**>(base + (0x00DDEA04 - 0x00400000));
+    stage = client ? *reinterpret_cast<LONG*>(client + 0x88) : -1;
+    localState = localNode ? *reinterpret_cast<LONG*>(localNode + 0x0C) : -1;
+    meshState = mesh ? *reinterpret_cast<LONG*>(mesh + 0x3C) : -1;
+    ready = client && localNode && client[0x9D] == 0 && stage == 2 && localState == 3 && meshState == 3;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+  if (!coop_matchmaking::ShouldSignalFlowForMemberCount(completed, memberCount, ready)) return false;
+
+  BYTE* function = base + (0x00882040 - 0x00400000);
+  const BYTE expected[] = {0x83, 0xEC, 0x50, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x5C, 0x83,
+                           0xFF, 0x09, 0x8B, 0xF1};
+  if (memcmp(function, expected, sizeof(expected)) != 0) {
+    static volatile LONG signatureLogged = 0;
+    if (InterlockedCompareExchange(&signatureLogged, 1, 0) == 0)
+      Log("production transition: SignalFlowBasic signature mismatch");
+    return false;
+  }
+
+  using SignalFlowBasicFn = void (__thiscall*)(void*, int, void*, void*);
+  Log("production transition: signaling command=3 members=%ld completed=%ld client=%p stage=%ld localState=%ld meshState=%ld",
+      memberCount, completed, client, stage, localState, meshState);
+  __try {
+    reinterpret_cast<SignalFlowBasicFn>(function)(client, 3, nullptr, nullptr);
+    InterlockedExchange(&g_productionFlowSignalMembers, memberCount);
+    Log("production transition: command=3 queued members=%ld", memberCount);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("production transition: command=3 raised exception code=%08lX", GetExceptionCode());
+    return false;
+  }
+}
+
 void __cdecl Hook_RunCallbacksImpl() {
   // Steam announces a new P2P sender before the title consumes that sender's setup traffic.
   // Discover all queued harness senders first so the real callback pump cannot drain the
@@ -3328,10 +3538,16 @@ void __cdecl Hook_RunCallbacksImpl() {
     const LONG pump = InterlockedIncrement(&memberTagPumps);
     void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
     const unsigned long long lobby = static_cast<unsigned long long>(InterlockedCompareExchange64(&g_productionLobby, 0, 0));
-    if (matchmaking && lobby && (pump <= 300 || pump % 600 == 0)) {
-      using SetMemberData_t = void(__thiscall*)(void*, unsigned long long, const char*, const char*);
-      reinterpret_cast<SetMemberData_t>((*reinterpret_cast<void***>(matchmaking))[25])(
+    if (matchmaking && lobby) {
+      void** methods = *reinterpret_cast<void***>(matchmaking);
+      using GetMemberCount_t = int(__thiscall*)(void*, unsigned long long);
+      const LONG memberCount = reinterpret_cast<GetMemberCount_t>(methods[17])(matchmaking, lobby);
+      TrySignalProductionFlowCommand(memberCount);
+      if (pump <= 300 || pump % 600 == 0) {
+        using SetMemberData_t = void(__thiscall*)(void*, unsigned long long, const char*, const char*);
+        reinterpret_cast<SetMemberData_t>(methods[25])(
           matchmaking, lobby, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue);
+      }
     }
   }
   if (g_harness) {
@@ -3738,10 +3954,12 @@ bool MatchMasked(const BYTE* address, const BYTE* pattern, const char* mask) {
 }
 
 void __fastcall Hook_AllocClientData(void* server, void*, unsigned int count) {
-  Log("client table: AllocClientData server=%p count=%u", server, count);
-  g_allocClientData(server, count);
+  const unsigned int effectiveCount =
+      g_production && g_requestedPlayers == 4 && count == 2 ? 4 : count;
+  Log("client table: AllocClientData server=%p requested=%u effective=%u", server, count, effectiveCount);
+  g_allocClientData(server, effectiveCount);
   InterlockedExchangePointer(&g_clientDataServer, server);
-  InterlockedExchange(&g_clientDataCount, static_cast<LONG>(count));
+  InterlockedExchange(&g_clientDataCount, static_cast<LONG>(effectiveCount));
   __try {
     Log("client table: allocated records=%p local-server=%p", *reinterpret_cast<void**>(static_cast<BYTE*>(server) + 0x54),
         *reinterpret_cast<void**>(static_cast<BYTE*>(server) + 0x58));
@@ -3805,6 +4023,7 @@ DWORD WINAPI ClientDataMonitorThread(LPVOID) {
 }
 
 bool InstallClientDataProbe(BYTE* base) {
+  if (InterlockedCompareExchange(&g_clientDataProbeInstalled, 0, 0) == 1) return true;
   // One path rebuilds the table from platform members; cP2PServer::Start allocates the initial table
   // from BeginDirectP2PGame's requested player count. Tap both calls without replacing the allocator.
   BYTE* populationCall = base + (0x00874163 - 0x00400000);
@@ -3839,6 +4058,7 @@ bool InstallClientDataProbe(BYTE* base) {
   }
   Log("client table: allocation probes installed population=%p startup=%p allocator=%p hook=%p",
       populationCall, startupCall, allocator, &Hook_AllocClientData);
+  InterlockedExchange(&g_clientDataProbeInstalled, 1);
   HANDLE monitor = CreateThread(nullptr, 0, ClientDataMonitorThread, nullptr, 0, nullptr);
   if (monitor) CloseHandle(monitor);
   return true;
@@ -4767,11 +4987,120 @@ bool InstallJoinPolicyTrace(BYTE* base) {
   return true;
 }
 
+bool InstallProductionLocalServerTrace(BYTE* base) {
+  if (InterlockedCompareExchange(&g_productionLocalServerTraceInstalled, 0, 0) == 1) return true;
+  void** acceptSlot = reinterpret_cast<void**>(base + (0x00CB9F68 - 0x00400000));
+  void* original = base + (0x00871190 - 0x00400000);
+  if (*acceptSlot == &Hook_LocalServerAccept) {
+    InterlockedExchange(&g_productionLocalServerTraceInstalled, 1);
+    return true;
+  }
+  if (*acceptSlot != original) {
+    Log("production admission: local-server Accept signature mismatch; serialized joins unavailable");
+    return false;
+  }
+  g_localServerAccept = reinterpret_cast<LocalServerAcceptFn>(original);
+  void* replacement = &Hook_LocalServerAccept;
+  if (!WriteSlot(acceptSlot, &replacement, sizeof(replacement))) return false;
+  struct AdmissionCallHook {
+    DWORD address;
+    DWORD target;
+    LocalServerAdmissionCheckFn* original;
+    void* replacement;
+  };
+  AdmissionCallHook checks[] = {
+      {0x0087120E, 0x008511C0, &g_localServerCapacityCheck,
+       reinterpret_cast<void*>(&Hook_LocalServerCapacityCheck)},
+      {0x00871221, 0x008622C0, &g_localServerSessionCheck,
+       reinterpret_cast<void*>(&Hook_LocalServerSessionCheck)},
+  };
+  for (const auto& check : checks) {
+    BYTE* call = base + (check.address - 0x00400000);
+    LONG relative = 0;
+    memcpy(&relative, call + 1, sizeof(relative));
+    if (call[0] != 0xE8 || call + 5 + relative != base + (check.target - 0x00400000)) {
+      Log("production admission: helper signature mismatch call=%08lX", check.address);
+      return false;
+    }
+    *check.original = reinterpret_cast<LocalServerAdmissionCheckFn>(
+        base + (check.target - 0x00400000));
+    BYTE patched[5] = {0xE8};
+    relative = static_cast<LONG>(static_cast<BYTE*>(check.replacement) - (call + 5));
+    memcpy(patched + 1, &relative, sizeof(relative));
+    if (!WriteSlot(call, patched, sizeof(patched))) return false;
+  }
+  Log("production admission: local-server Accept hook installed slot=%p original=%p", acceptSlot, original);
+  InterlockedExchange(&g_productionLocalServerTraceInstalled, 1);
+  return true;
+}
+
+bool InstallProductionEngineCapacity(BYTE* base) {
+  if (InterlockedCompareExchange(&g_productionEngineCapacityInstalled, 0, 0) == 1) return true;
+  if (!g_production || g_requestedPlayers != 4) return false;
+
+  auto* onlinePlayers = reinterpret_cast<LONG*>(base + (0x00DDCAB0 - 0x00400000));
+  auto* healthBarsOverride = reinterpret_cast<BYTE*>(base + (0x00DDCBA5 - 0x00400000));
+  const DWORD hostStatusGate = reinterpret_cast<DWORD>(base + (0x00DDCC2F - 0x00400000));
+  const DWORD onlinePlayersAddress = reinterpret_cast<DWORD>(onlinePlayers);
+  const DWORD healthBarsOverrideAddress = reinterpret_cast<DWORD>(healthBarsOverride);
+
+  const BYTE completionReader[] = {
+      0x80, 0x3D, 0, 0, 0, 0, 0, 0x74, 0x10, 0x8B, 0x0D, 0, 0, 0, 0,
+      0x85, 0xC9, 0x7E, 0x06, 0x3B, 0xCA, 0x74, 0x02, 0x32, 0xC0};
+  BYTE expectedCompletion[sizeof(completionReader)];
+  memcpy(expectedCompletion, completionReader, sizeof(expectedCompletion));
+  memcpy(expectedCompletion + 2, &hostStatusGate, sizeof(hostStatusGate));
+  memcpy(expectedCompletion + 11, &onlinePlayersAddress, sizeof(onlinePlayersAddress));
+  BYTE* flowReader = base + (0x00854120 - 0x00400000);
+  BYTE* syncReader = base + (0x008541E0 - 0x00400000);
+  const BYTE bypass[9] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+  const auto completionReady = [&](BYTE* reader) {
+    return memcmp(reader, expectedCompletion, sizeof(expectedCompletion)) == 0 ||
+        memcmp(reader, bypass, sizeof(bypass)) == 0;
+  };
+
+  const BYTE hudReader[] = {0x80, 0x3D, 0, 0, 0, 0, 0, 0x74, 0x10, 0x5E, 0xB8, 0x03, 0, 0, 0};
+  BYTE expectedHud[sizeof(hudReader)];
+  memcpy(expectedHud, hudReader, sizeof(expectedHud));
+  memcpy(expectedHud + 2, &healthBarsOverrideAddress, sizeof(healthBarsOverrideAddress));
+  BYTE* hud = base + (0x005C24C2 - 0x00400000);
+
+  const LONG currentPlayers = *onlinePlayers;
+  if (!completionReady(flowReader) || !completionReady(syncReader) ||
+      memcmp(hud, expectedHud, sizeof(expectedHud)) != 0 || currentPlayers < 0 || currentPlayers > 4) {
+    Log("production engine: four-player signatures unavailable count=%ld flow=%d sync=%d hud=%d",
+        currentPlayers, completionReady(flowReader), completionReady(syncReader),
+        memcmp(hud, expectedHud, sizeof(expectedHud)) == 0);
+    return false;
+  }
+
+  if (memcmp(flowReader, bypass, sizeof(bypass)) != 0 &&
+      !WriteSlot(flowReader, bypass, sizeof(bypass))) return false;
+  if (memcmp(syncReader, bypass, sizeof(bypass)) != 0 &&
+      !WriteSlot(syncReader, bypass, sizeof(bypass))) return false;
+  // Retail serializes campaign joins. Start with host + first remote and raise this target in
+  // Hook_CanListen as each additional distinct remote link is admitted.
+  const LONG requested = 2;
+  const BYTE enabled = 1;
+  if (!WriteSlot(onlinePlayers, &requested, sizeof(requested)) ||
+      !WriteSlot(healthBarsOverride, &enabled, sizeof(enabled))) return false;
+
+  Log("production engine: mOnlineNumPlayers %ld->2 dynamic; client collection is four-wide; partner HUD slots enabled",
+      currentPlayers);
+  InterlockedExchange(&g_productionEngineCapacityInstalled, 1);
+  return true;
+}
+
 DWORD WINAPI ProductionPatchThread(LPVOID) {
   BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+  // The debug-override registrar initializes these globals during frontend startup.
+  // Apply the production values afterward so registration cannot restore retail defaults.
+  Sleep(3000);
   for (int wait = 0; wait < 1200; wait++) {
-    if (InstallCampaignAdmissionCapacity(base) && InstallJoinPolicyTrace(base)) {
-      Log("production co-op: four-player campaign capacity and mod-only admission installed");
+    if (InstallCampaignAdmissionCapacity(base) && InstallJoinPolicyTrace(base) &&
+        InstallProductionLocalServerTrace(base) && InstallClientDataProbe(base) &&
+        InstallProductionEngineCapacity(base)) {
+      Log("production co-op: four-player campaign admission, collection, and HUD capacity installed");
       return 0;
     }
     Sleep(100);
@@ -5416,6 +5745,7 @@ void Initialize(const wchar_t* root) {
     g_thunkTables[kMatchmaking][20] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyData);
     g_thunkTables[kMatchmaking][31] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyMemberLimit);
     g_thunkTables[kMatchmaking][33] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyType);
+    g_thunkTables[kFriends][7] = reinterpret_cast<void*>(Mod_Friends_GetFriendPersonaName);
     if (g_baseGameDlcCompatibility)
       g_thunkTables[kApps][coop_matchmaking::kAppsBIsDlcInstalledSlot] =
           reinterpret_cast<void*>(Mod_Apps_BIsDlcInstalled);

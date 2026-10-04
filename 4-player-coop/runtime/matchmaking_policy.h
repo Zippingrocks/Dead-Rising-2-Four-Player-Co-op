@@ -6,7 +6,7 @@ namespace coop_matchmaking {
 
 // Increment this value whenever network-visible behavior becomes incompatible.
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
-constexpr char kProtocolValue[] = "2";
+constexpr char kProtocolValue[] = "3";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;
@@ -41,6 +41,32 @@ inline int VisibleProductionLobbyType(int requestedType) {
 
 inline bool ShouldLogAdmissionAttempt(long attempt) {
   return attempt > 0 && (attempt <= kAdmissionLogBurst || attempt % kAdmissionLogInterval == 0);
+}
+
+inline long CollectionTargetForOccupiedRemoteLinks(long occupiedLinks) {
+  if (occupiedLinks < 0) occupiedLinks = 0;
+  const long target = occupiedLinks + 2;  // host + existing remotes + incoming remote
+  return target > kMemberLimit ? kMemberLimit : target;
+}
+
+inline long CollectionTargetForAcceptedClients(long acceptedClients) {
+  if (acceptedClients < 0) acceptedClients = 0;
+  long target = acceptedClients + 1;  // include the client currently being accepted
+  if (target < 2) target = 2;
+  return target > kMemberLimit ? kMemberLimit : target;
+}
+
+inline bool ShouldAllowConnectedJoin(bool nativeResult, bool connected, bool full, bool duplicate,
+                                     long occupiedLinks, long linkLimit, long acceptedClients,
+                                     unsigned char localServerBusy) {
+  return !nativeResult && connected && !full && !duplicate && linkLimit > 0 && occupiedLinks < linkLimit &&
+      acceptedClients >= 2 && localServerBusy == 0;
+}
+
+inline bool ShouldSignalFlowForMemberCount(long completedMembers, long currentMembers,
+                                           bool nativeSessionReady) {
+  return nativeSessionReady && currentMembers >= 3 && currentMembers <= kMemberLimit &&
+      currentMembers > completedMembers;
 }
 
 inline bool IsRequiredProductionImport(const char* dll, const char* name) {

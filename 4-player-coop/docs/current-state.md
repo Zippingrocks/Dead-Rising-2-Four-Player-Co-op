@@ -636,6 +636,20 @@ all eight archive hashes, render settings, and original save were verified resto
 - Implement the user-selectable solo/two/four-player menu and preserve ordinary solo/two-player behavior.
 - Validate real remote Steam sessions separately; the current identity/lobby/transport provider is local-only.
 
+## Live Steam admission checkpoint (2026-10-04)
+
+A real remote host admitted Player 2 normally, then admitted a third Steam peer after four production-only limits
+were corrected: campaign capacity, remote-link count, `cLocalServer` slot count, and the native
+`cP2PServer::tClientData` allocation. The host retained four allocated `0x48` records; Player 3 populated record 2,
+returned success from `cLocalServer::Accept`, and became confirmed by all three members without the former DLC error
+or access violation. This is genuine three-member Steam admission, not completed gameplay.
+
+Player 3 then remained at `Exchanging game data`. The host records showed command-3 flow bits cleared for the host
+and established Player 2. Vanilla has no reason to resignal those participants for a third entrant. Protocol 3 adds
+an all-client production resignal when Steam lobby membership grows to three or four; all participants must run the
+same Alpha 9 candidate. Persona lookup tracing was also added because the host's Player 3 prompt displayed Player
+2's cached name. Alpha 8 and protocol-3 sessions are intentionally incompatible.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.

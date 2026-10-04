@@ -51,6 +51,12 @@ With `BaseGameDlcCompatibility=1` (the package default), four-player mode report
 Fortune, and Sports Fan skill packs unavailable for that process. This creates a common base-game DLC profile; it does
 not unlock content, remove files, or alter Steam ownership. Alpha 8 uses network protocol `2` and cannot match Alpha 7.
 
+Alpha 9 expands DR2's native client table to four records and opens the third and fourth local-server slots only when
+those players arrive. It also repeats DR2's native game-data readiness signal on every client when the lobby grows to
+three or four members, allowing the new member to pass `Exchanging game data`. Incoming-call persona tracing is enabled
+to diagnose a stock prompt that can display the previous player's name. Alpha 9 uses network protocol `3`; every
+participant must update before testing.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -66,4 +72,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.8`. Network protocol: `2`.
+Current release: `0.1.0-alpha.9`. Network protocol: `3`.

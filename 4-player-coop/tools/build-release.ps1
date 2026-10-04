@@ -13,7 +13,12 @@ $buildRoot = Join-Path $repoRoot "4-player-coop\builds"
 if (-not $OutputDir) { $OutputDir = Join-Path $buildRoot "releases" }
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $version = (Get-Content -LiteralPath (Join-Path $packageSource "VERSION") -Raw).Trim()
-$protocol = "2"
+$policyHeader = Get-Content -LiteralPath (Join-Path $repoRoot "4-player-coop\runtime\matchmaking_policy.h") -Raw
+$protocolMatch = [regex]::Match($policyHeader, 'kProtocolValue\[\]\s*=\s*"(?<value>[^"]+)"')
+if (-not $protocolMatch.Success) {
+    throw "Could not read kProtocolValue from matchmaking_policy.h"
+}
+$protocol = $protocolMatch.Groups["value"].Value
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$') {
     throw "Invalid package VERSION: $version"
 }
