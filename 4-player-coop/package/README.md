@@ -57,6 +57,11 @@ three or four members, allowing the new member to pass `Exchanging game data`. I
 to diagnose a stock prompt that can display the previous player's name. Alpha 9 uses network protocol `3`; every
 participant must update before testing.
 
+Alpha 10 corrects the readiness trigger found during the Alpha 9 live test. Steam's lobby-member count remains stale
+while DR2 is exchanging game data, even though DR2 has already admitted and confirmed the third native client record.
+Every participant now uses DR2's occupied native client records as the authoritative growth signal and Steam's count as
+a fallback, ensuring command 3 is resent after the third or fourth record appears. Alpha 10 uses network protocol `4`.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -72,4 +77,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.9`. Network protocol: `3`.
+Current release: `0.1.0-alpha.10`. Network protocol: `4`.

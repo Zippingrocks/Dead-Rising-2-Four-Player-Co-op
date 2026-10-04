@@ -19,7 +19,7 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
 - User-supervised local testing passed four-owner combat, replicated damage, KO, and teammate revive behavior.
   Complete partner HUD behavior, campaign-wide scripting, and production Steam session validation remain unfinished.
 - The production runtime is now always four-player when `four_player_coop.ini` is installed. It adds the strict
-  `dr2_4p_protocol=3` Steam lobby filter, advertises the same tag through lobby metadata and rich presence, forces a
+  `dr2_4p_protocol=4` Steam lobby filter, advertises the same tag through lobby metadata and rich presence, forces a
   four-member limit, and rejects incompatible outgoing or incoming joins. Its default base-game compatibility mode
   reports the four optional skill packs as disabled during the modded process so differing DLC ownership cannot split
   the test group. Vanilla menus are unchanged. Remote Steam behavior still needs live validation.

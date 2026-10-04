@@ -650,6 +650,11 @@ an all-client production resignal when Steam lobby membership grows to three or 
 same Alpha 9 candidate. Persona lookup tracing was also added because the host's Player 3 prompt displayed Player
 2's cached name. Alpha 8 and protocol-3 sessions are intentionally incompatible.
 
+The Alpha 9 live follow-up admitted and confirmed three remote Steam records again, but its resignal did not fire:
+Steam continued reporting the old lobby-member count during the exchange phase. Alpha 10/protocol 4 therefore uses
+the occupied native four-record client table as the authoritative growth signal on every participant, retaining the
+Steam count only as a fallback. This directly targets the reproduced stall without changing the proven admission path.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.

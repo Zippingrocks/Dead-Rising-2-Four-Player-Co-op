@@ -3457,7 +3457,28 @@ void DispatchP2PSessionRequest() {
   }
 }
 
-bool TrySignalProductionFlowCommand(LONG memberCount) {
+LONG ProductionNativeMemberCount() {
+  void* server = InterlockedCompareExchangePointer(&g_clientDataServer, nullptr, nullptr);
+  LONG allocated = InterlockedCompareExchange(&g_clientDataCount, 0, 0);
+  if (!server || allocated <= 0) return 0;
+  if (allocated > coop_matchmaking::kMemberLimit) allocated = coop_matchmaking::kMemberLimit;
+
+  LONG occupied = 0;
+  __try {
+    BYTE* records = *reinterpret_cast<BYTE**>(static_cast<BYTE*>(server) + 0x54);
+    if (!records) return 0;
+    for (LONG index = 0; index < allocated; index++) {
+      if (*reinterpret_cast<unsigned long long*>(records + index * 0x48) != 0) occupied++;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+  return occupied;
+}
+
+bool TrySignalProductionFlowCommand(LONG steamMemberCount) {
+  const LONG nativeMemberCount = ProductionNativeMemberCount();
+  const LONG memberCount = coop_matchmaking::EffectiveMemberCount(nativeMemberCount, steamMemberCount);
   LONG completed = InterlockedCompareExchange(&g_productionFlowSignalMembers, 0, 0);
   if (memberCount < completed) {
     InterlockedExchange(&g_productionFlowSignalMembers, memberCount < 2 ? 2 : memberCount);
@@ -3498,8 +3519,9 @@ bool TrySignalProductionFlowCommand(LONG memberCount) {
   }
 
   using SignalFlowBasicFn = void (__thiscall*)(void*, int, void*, void*);
-  Log("production transition: signaling command=3 members=%ld completed=%ld client=%p stage=%ld localState=%ld meshState=%ld",
-      memberCount, completed, client, stage, localState, meshState);
+  Log("production transition: signaling command=3 members=%ld nativeMembers=%ld steamMembers=%ld completed=%ld "
+      "client=%p stage=%ld localState=%ld meshState=%ld",
+      memberCount, nativeMemberCount, steamMemberCount, completed, client, stage, localState, meshState);
   __try {
     reinterpret_cast<SignalFlowBasicFn>(function)(client, 3, nullptr, nullptr);
     InterlockedExchange(&g_productionFlowSignalMembers, memberCount);

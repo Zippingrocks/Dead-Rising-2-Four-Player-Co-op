@@ -6,7 +6,7 @@ namespace coop_matchmaking {
 
 // Increment this value whenever network-visible behavior becomes incompatible.
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
-constexpr char kProtocolValue[] = "3";
+constexpr char kProtocolValue[] = "4";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;
@@ -67,6 +67,13 @@ inline bool ShouldSignalFlowForMemberCount(long completedMembers, long currentMe
                                            bool nativeSessionReady) {
   return nativeSessionReady && currentMembers >= 3 && currentMembers <= kMemberLimit &&
       currentMembers > completedMembers;
+}
+
+inline long EffectiveMemberCount(long nativeMembers, long steamMembers) {
+  if (nativeMembers < 0) nativeMembers = 0;
+  if (steamMembers < 0) steamMembers = 0;
+  const long count = nativeMembers > steamMembers ? nativeMembers : steamMembers;
+  return count > kMemberLimit ? kMemberLimit : count;
 }
 
 inline bool IsRequiredProductionImport(const char* dll, const char* name) {
