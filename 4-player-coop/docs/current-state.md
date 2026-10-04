@@ -569,6 +569,13 @@ with the same policy. It also changes the SetLobbyData, SetLobbyMemberLimit, and
 `BOOL` to the Steamworks C++ `bool` ABI; the prior mismatch produced garbage-looking nonzero return values and could
 misclassify a failed call as successful. Remote friend visibility and four-peer admission remain the acceptance test.
 
+The first Alpha 5 remote attempts exposed a circular admission gate: three real peers reached `Hook_CanListen`, but
+their member-level protocol metadata remained unavailable while the host rejected the P2P traffic needed to complete
+admission. Alpha 6 now requires the host lobby's protocol tag and verifies that the requesting Steam ID is already in
+that lobby's member list. A missing member-level tag is treated as propagation delay only for such listed members;
+peers outside the tagged lobby remain rejected. Rejection diagnostics now log an initial burst and periodic samples
+instead of writing approximately ten lines per second per incompatible peer.
+
 The active gates after `20261001_141156` are attributable combat for P1-P4,
 replicated damage, genuine KO and teammate revive, a game-authored save/load,
 disconnect/rejoin recovery, broader campaign scripting, production Steam peers,

@@ -33,6 +33,12 @@ not visible to friends. In production four-player mode, Alpha 5 maps only that i
 incompatible mod builds out of matchmaking. Alpha 5 also corrects the Steamworks `bool` ABI used when setting lobby
 metadata, limits, and visibility.
 
+Alpha 6 fixes a real-Steam admission deadlock found immediately afterward. The host previously required a peer's
+member-level protocol tag before allowing its first P2P packet, but Steam may not expose that member tag until the
+peer has completed the same admission path. Alpha 6 accepts a peer only when it is already listed in the host's
+protocol-tagged lobby; it continues rejecting peers outside that lobby. Repeated rejection diagnostics are rate
+limited so an incompatible client cannot flood `coop_net.log`.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -48,4 +54,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.5`. Network protocol: `1`.
+Current release: `0.1.0-alpha.6`. Network protocol: `1`.

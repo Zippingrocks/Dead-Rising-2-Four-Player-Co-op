@@ -17,6 +17,12 @@ int main() {
   assert(coop_matchmaking::VisibleProductionLobbyType(2) == 2);
   assert(coop_matchmaking::VisibleProductionLobbyType(1) == 1);
   assert(coop_matchmaking::VisibleProductionLobbyType(0) == 0);
+  assert(!coop_matchmaking::ShouldLogAdmissionAttempt(0));
+  assert(coop_matchmaking::ShouldLogAdmissionAttempt(1));
+  assert(coop_matchmaking::ShouldLogAdmissionAttempt(coop_matchmaking::kAdmissionLogBurst));
+  assert(!coop_matchmaking::ShouldLogAdmissionAttempt(coop_matchmaking::kAdmissionLogBurst + 1));
+  assert(coop_matchmaking::ShouldLogAdmissionAttempt(coop_matchmaking::kAdmissionLogInterval));
+  assert(!coop_matchmaking::ShouldLogAdmissionAttempt(coop_matchmaking::kAdmissionLogInterval + 1));
   assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamMatchmaking"));
   assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamAPI_RunCallbacks"));
   assert(!coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamNetworking"));

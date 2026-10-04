@@ -10,6 +10,8 @@ constexpr char kProtocolValue[] = "1";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;
+constexpr long kAdmissionLogBurst = 8;
+constexpr long kAdmissionLogInterval = 500;
 
 inline bool IsCompatible(const char* value) {
   return value && strcmp(value, kProtocolValue) == 0;
@@ -17,6 +19,10 @@ inline bool IsCompatible(const char* value) {
 
 inline int VisibleProductionLobbyType(int requestedType) {
   return requestedType == kInvisibleLobbyType ? kPublicLobbyType : requestedType;
+}
+
+inline bool ShouldLogAdmissionAttempt(long attempt) {
+  return attempt > 0 && (attempt <= kAdmissionLogBurst || attempt % kAdmissionLogInterval == 0);
 }
 
 inline bool IsRequiredProductionImport(const char* dll, const char* name) {

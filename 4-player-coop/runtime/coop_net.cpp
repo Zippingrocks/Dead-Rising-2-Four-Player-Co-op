@@ -302,16 +302,47 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
     const unsigned long long lobby = static_cast<unsigned long long>(
         InterlockedCompareExchange64(&g_productionLobby, 0, 0));
     const char* protocol = nullptr;
+    const char* lobbyProtocol = nullptr;
+    bool listedMember = false;
     if (matchmaking && lobby && peer) {
       using GetMemberData_t = const char*(__thiscall*)(void*, unsigned long long, unsigned long long, const char*);
-      protocol = reinterpret_cast<GetMemberData_t>((*reinterpret_cast<void***>(matchmaking))[24])(
+      void** methods = *reinterpret_cast<void***>(matchmaking);
+      protocol = reinterpret_cast<GetMemberData_t>(methods[24])(
           matchmaking, lobby, *peer, coop_matchmaking::kProtocolKey);
+      using GetLobbyData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+      lobbyProtocol = reinterpret_cast<GetLobbyData_t>(methods[19])(
+          matchmaking, lobby, coop_matchmaking::kProtocolKey);
+      using GetMemberCount_t = int(__thiscall*)(void*, unsigned long long);
+      using GetMemberByIndex_t = void*(__thiscall*)(void*, unsigned long long*, unsigned long long, int);
+      const int memberCount = reinterpret_cast<GetMemberCount_t>(methods[17])(matchmaking, lobby);
+      for (int i = 0; i < memberCount; i++) {
+        unsigned long long member = 0;
+        reinterpret_cast<GetMemberByIndex_t>(methods[18])(matchmaking, &member, lobby, i);
+        if (member == *peer) {
+          listedMember = true;
+          break;
+        }
+      }
     }
     if (!coop_matchmaking::IsCompatible(protocol)) {
-      Log("production admission: rejected untagged peer=%08lX%08lX protocol='%s'",
-          peer ? static_cast<DWORD>(*peer >> 32) : 0, peer ? static_cast<DWORD>(*peer) : 0,
-          protocol ? protocol : "<null>");
-      return false;
+      if (!coop_matchmaking::IsCompatible(lobbyProtocol) || !listedMember) {
+        static volatile LONG rejectedAttempts = 0;
+        const LONG attempt = InterlockedIncrement(&rejectedAttempts);
+        if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
+          Log("production admission: rejected peer=%08lX%08lX memberProtocol='%s' lobbyProtocol='%s' "
+              "listedMember=%d attempt=%ld",
+              peer ? static_cast<DWORD>(*peer >> 32) : 0, peer ? static_cast<DWORD>(*peer) : 0,
+              protocol ? protocol : "<null>", lobbyProtocol ? lobbyProtocol : "<null>", listedMember, attempt);
+        }
+        return false;
+      }
+      static volatile LONG pendingTagAdmissions = 0;
+      const LONG attempt = InterlockedIncrement(&pendingTagAdmissions);
+      if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
+        Log("production admission: accepting listed peer=%08lX%08lX from tagged lobby while member tag propagates "
+            "attempt=%ld",
+            static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), attempt);
+      }
     }
   }
   const bool result = g_canListen(query, nonce, peer, port);
