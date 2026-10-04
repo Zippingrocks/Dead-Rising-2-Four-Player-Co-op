@@ -576,6 +576,14 @@ that lobby's member list. A missing member-level tag is treated as propagation d
 peers outside the tagged lobby remain rejected. Rejection diagnostics now log an initial burst and periodic samples
 instead of writing approximately ten lines per second per incompatible peer.
 
+The first Alpha 6 remote control confirmed that Steam can deliver `CanListen` before the joining peer appears in the
+host's lobby-member list: peer `011000013C773898` reached a correctly tagged four-member public lobby but remained
+`listedMember=0` through more than 500 admission attempts. Alpha 7 adds a pre-admission proof without opening the
+lobby gate. Every modded client publishes `dr2_4p_protocol=1` through `ISteamFriends014::SetRichPresence`; the host
+queries that peer marker when member metadata is not yet available. Admission still requires a protocol-tagged host
+lobby, and an explicit incompatible member marker remains authoritative. The next remote control must confirm the
+peer's presence marker propagates before or during the repeated native admission requests.
+
 The active gates after `20261001_141156` are attributable combat for P1-P4,
 replicated damage, genuine KO and teammate revive, a game-authored save/load,
 disconnect/rejoin recovery, broader campaign scripting, production Steam peers,

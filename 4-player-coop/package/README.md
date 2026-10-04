@@ -39,6 +39,12 @@ peer has completed the same admission path. Alpha 6 accepts a peer only when it 
 protocol-tagged lobby; it continues rejecting peers outside that lobby. Repeated rejection diagnostics are rate
 limited so an incompatible client cannot flood `coop_net.log`.
 
+Alpha 7 fixes the remaining ordering deadlock observed in the first Alpha 6 test. Steam can request native P2P
+admission before the joining account appears in the host's lobby-member list. Every Alpha 7 client now publishes the
+same protocol marker through Steam rich presence. The host accepts a pending peer only when the host lobby is tagged
+and that peer supplies matching member metadata or matching rich-presence proof. Explicitly incompatible peers and
+requests outside a tagged lobby remain rejected.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -54,4 +60,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.6`. Network protocol: `1`.
+Current release: `0.1.0-alpha.7`. Network protocol: `1`.

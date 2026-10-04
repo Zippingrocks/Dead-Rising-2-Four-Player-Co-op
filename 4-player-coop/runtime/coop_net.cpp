@@ -53,6 +53,7 @@ bool g_trace = false;
 bool g_harness = false;
 bool g_production = false;
 void* volatile g_productionMatchmaking = nullptr;
+void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
 bool g_silent = false;
 bool g_isolatedDesktop = false;
@@ -303,6 +304,7 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
         InterlockedCompareExchange64(&g_productionLobby, 0, 0));
     const char* protocol = nullptr;
     const char* lobbyProtocol = nullptr;
+    const char* richPresenceProtocol = nullptr;
     bool listedMember = false;
     if (matchmaking && lobby && peer) {
       using GetMemberData_t = const char*(__thiscall*)(void*, unsigned long long, unsigned long long, const char*);
@@ -324,24 +326,43 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
         }
       }
     }
-    if (!coop_matchmaking::IsCompatible(protocol)) {
-      if (!coop_matchmaking::IsCompatible(lobbyProtocol) || !listedMember) {
+    void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+    if (friends && peer && coop_matchmaking::IsMissing(protocol)) {
+      void** methods = *reinterpret_cast<void***>(friends);
+      using GetPresence_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+      richPresenceProtocol = reinterpret_cast<GetPresence_t>(
+          methods[coop_matchmaking::kFriendsGetFriendRichPresenceSlot])(
+          friends, *peer, coop_matchmaking::kProtocolKey);
+      if (coop_matchmaking::IsMissing(richPresenceProtocol)) {
+        static volatile LONG presenceRequests = 0;
+        const LONG request = InterlockedIncrement(&presenceRequests);
+        if (coop_matchmaking::ShouldLogAdmissionAttempt(request)) {
+          using RequestPresence_t = void(__thiscall*)(void*, unsigned long long);
+          reinterpret_cast<RequestPresence_t>(
+              methods[coop_matchmaking::kFriendsRequestFriendRichPresenceSlot])(friends, *peer);
+        }
+      }
+    }
+    if (!coop_matchmaking::IsCompatible(lobbyProtocol) ||
+        !coop_matchmaking::HasPeerProof(protocol, richPresenceProtocol)) {
         static volatile LONG rejectedAttempts = 0;
         const LONG attempt = InterlockedIncrement(&rejectedAttempts);
         if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
-          Log("production admission: rejected peer=%08lX%08lX memberProtocol='%s' lobbyProtocol='%s' "
-              "listedMember=%d attempt=%ld",
+          Log("production admission: rejected peer=%08lX%08lX memberProtocol='%s' presenceProtocol='%s' "
+              "lobbyProtocol='%s' listedMember=%d attempt=%ld",
               peer ? static_cast<DWORD>(*peer >> 32) : 0, peer ? static_cast<DWORD>(*peer) : 0,
-              protocol ? protocol : "<null>", lobbyProtocol ? lobbyProtocol : "<null>", listedMember, attempt);
+              protocol ? protocol : "<null>", richPresenceProtocol ? richPresenceProtocol : "<null>",
+              lobbyProtocol ? lobbyProtocol : "<null>", listedMember, attempt);
         }
         return false;
-      }
+    }
+    if (!coop_matchmaking::IsCompatible(protocol)) {
       static volatile LONG pendingTagAdmissions = 0;
       const LONG attempt = InterlockedIncrement(&pendingTagAdmissions);
       if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
-        Log("production admission: accepting listed peer=%08lX%08lX from tagged lobby while member tag propagates "
-            "attempt=%ld",
-            static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), attempt);
+        Log("production admission: accepting presence-verified peer=%08lX%08lX while lobby membership propagates "
+            "listedMember=%d attempt=%ld",
+            static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer), listedMember, attempt);
       }
     }
   }
@@ -3127,8 +3148,10 @@ Proxy g_proxies[16];
 int g_proxyCount = 0;
 
 void* Wrap(void* real, int iface) {
-  if (!real || (!g_trace && !g_harness && !(g_production && iface == kMatchmaking))) return real;
+  if (!real) return real;
   if (g_production && iface == kMatchmaking) InterlockedExchangePointer(&g_productionMatchmaking, real);
+  if (g_production && iface == kFriends) InterlockedExchangePointer(&g_productionFriends, real);
+  if (!g_trace && !g_harness && !(g_production && iface == kMatchmaking)) return real;
   EnterCriticalSection(&g_lock);
   for (int i = 0; i < g_proxyCount; i++) {
     if (g_proxies[i].real == real) {
@@ -3253,6 +3276,22 @@ void __cdecl Hook_RunCallbacksImpl() {
   if (g_harness) DispatchP2PSessionRequest();
   if (Real_RunCallbacks) Real_RunCallbacks();
   if (g_production) {
+    static volatile LONG presencePublished = 0;
+    void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+    if (!friends && Real_Accessor[kFriends]) {
+      friends = Real_Accessor[kFriends]();
+      if (friends) InterlockedExchangePointer(&g_productionFriends, friends);
+    }
+    if (friends && !InterlockedCompareExchange(&presencePublished, 0, 0)) {
+      using SetPresence_t = bool(__thiscall*)(void*, const char*, const char*);
+      const bool published = reinterpret_cast<SetPresence_t>((*reinterpret_cast<void***>(friends))[
+          coop_matchmaking::kFriendsSetRichPresenceSlot])(
+          friends, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue);
+      if (published && !InterlockedExchange(&presencePublished, 1)) {
+        Log("production matchmaking: published rich presence %s=%s", coop_matchmaking::kProtocolKey,
+            coop_matchmaking::kProtocolValue);
+      }
+    }
     static volatile LONG memberTagPumps = 0;
     const LONG pump = InterlockedIncrement(&memberTagPumps);
     void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
