@@ -8,9 +8,15 @@ namespace coop_matchmaking {
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
 constexpr char kProtocolValue[] = "1";
 constexpr int kMemberLimit = 4;
+constexpr int kPublicLobbyType = 2;
+constexpr int kInvisibleLobbyType = 3;
 
 inline bool IsCompatible(const char* value) {
   return value && strcmp(value, kProtocolValue) == 0;
+}
+
+inline int VisibleProductionLobbyType(int requestedType) {
+  return requestedType == kInvisibleLobbyType ? kPublicLobbyType : requestedType;
 }
 
 inline bool IsRequiredProductionImport(const char* dll, const char* name) {

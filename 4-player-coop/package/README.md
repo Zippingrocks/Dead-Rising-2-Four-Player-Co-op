@@ -27,6 +27,12 @@ Player 2 joined, and prevented Players 3 and 4 from being admitted. Alpha 4 now 
 Steam launches, requests a four-member lobby, and keeps Steam's native invite path intact. The next group test should
 confirm that invite options remain available after Player 2 joins and disappear only when the lobby reaches four.
 
+Alpha 5 fixes the next live-test finding: DR2 requests an invisible Steam lobby (`type 3`), which is searchable but is
+not visible to friends. In production four-player mode, Alpha 5 maps only that invisible type to a public lobby
+(`type 2`) and prevents a later `SetLobbyType` call from hiding it again. Protocol filtering still keeps vanilla and
+incompatible mod builds out of matchmaking. Alpha 5 also corrects the Steamworks `bool` ABI used when setting lobby
+metadata, limits, and visibility.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -42,4 +48,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.4`. Network protocol: `1`.
+Current release: `0.1.0-alpha.5`. Network protocol: `1`.

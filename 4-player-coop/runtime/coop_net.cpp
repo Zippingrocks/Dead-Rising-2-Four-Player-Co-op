@@ -2374,8 +2374,10 @@ unsigned long long __fastcall Mod_Matchmaking_RequestLobbyList(Proxy* proxy, voi
 
 unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, int type, int) {
   using Method_t = unsigned long long(__thiscall*)(void*, int, int);
-  Log("production matchmaking: CreateLobby type=%d limit=%d", type, coop_matchmaking::kMemberLimit);
-  return RealMethod<Method_t>(proxy, 13)(proxy->real, type, coop_matchmaking::kMemberLimit);
+  const int visibleType = coop_matchmaking::VisibleProductionLobbyType(type);
+  Log("production matchmaking: CreateLobby requestedType=%d effectiveType=%d limit=%d", type, visibleType,
+      coop_matchmaking::kMemberLimit);
+  return RealMethod<Method_t>(proxy, 13)(proxy->real, visibleType, coop_matchmaking::kMemberLimit);
 }
 
 unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, unsigned long long lobby) {
@@ -2393,14 +2395,14 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
   return RealMethod<Join_t>(proxy, 14)(proxy->real, lobby);
 }
 
-BOOL __fastcall Mod_Matchmaking_SetLobbyData(Proxy* proxy, void*, unsigned long long lobby,
+bool __fastcall Mod_Matchmaking_SetLobbyData(Proxy* proxy, void*, unsigned long long lobby,
                                               const char* key, const char* value) {
-  using Method_t = BOOL(__thiscall*)(void*, unsigned long long, const char*, const char*);
+  using Method_t = bool(__thiscall*)(void*, unsigned long long, const char*, const char*);
   Method_t set = RealMethod<Method_t>(proxy, 20);
   const bool protocolKey = key && _stricmp(key, coop_matchmaking::kProtocolKey) == 0;
-  const BOOL original = set(proxy->real, lobby, protocolKey ? coop_matchmaking::kProtocolKey : key,
+  const bool original = set(proxy->real, lobby, protocolKey ? coop_matchmaking::kProtocolKey : key,
                             protocolKey ? coop_matchmaking::kProtocolValue : value);
-  const BOOL tagged = protocolKey ? original : set(proxy->real, lobby, coop_matchmaking::kProtocolKey,
+  const bool tagged = protocolKey ? original : set(proxy->real, lobby, coop_matchmaking::kProtocolKey,
                                                     coop_matchmaking::kProtocolValue);
   if (tagged) InterlockedExchange64(&g_productionLobby, static_cast<LONG64>(lobby));
   Log("production matchmaking: tagged lobby=%08lX%08lX %s=%s result=%d",
@@ -2409,9 +2411,17 @@ BOOL __fastcall Mod_Matchmaking_SetLobbyData(Proxy* proxy, void*, unsigned long 
   return original && tagged;
 }
 
-BOOL __fastcall Mod_Matchmaking_SetLobbyMemberLimit(Proxy* proxy, void*, unsigned long long lobby, int) {
-  using Method_t = BOOL(__thiscall*)(void*, unsigned long long, int);
+bool __fastcall Mod_Matchmaking_SetLobbyMemberLimit(Proxy* proxy, void*, unsigned long long lobby, int) {
+  using Method_t = bool(__thiscall*)(void*, unsigned long long, int);
   return RealMethod<Method_t>(proxy, 31)(proxy->real, lobby, coop_matchmaking::kMemberLimit);
+}
+
+bool __fastcall Mod_Matchmaking_SetLobbyType(Proxy* proxy, void*, unsigned long long lobby, int type) {
+  using Method_t = bool(__thiscall*)(void*, unsigned long long, int);
+  const int visibleType = coop_matchmaking::VisibleProductionLobbyType(type);
+  Log("production matchmaking: SetLobbyType lobby=%08lX%08lX requestedType=%d effectiveType=%d",
+      static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), type, visibleType);
+  return RealMethod<Method_t>(proxy, 33)(proxy->real, lobby, visibleType);
 }
 
 constexpr unsigned long long kLocalSteamIdPrefix = 0x0110000100000000ULL;
@@ -5301,6 +5311,7 @@ void Initialize(const wchar_t* root) {
     g_thunkTables[kMatchmaking][14] = reinterpret_cast<void*>(Mod_Matchmaking_JoinLobby);
     g_thunkTables[kMatchmaking][20] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyData);
     g_thunkTables[kMatchmaking][31] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyMemberLimit);
+    g_thunkTables[kMatchmaking][33] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyType);
   }
   wchar_t logPath[MAX_PATH];
   if (g_instance > 0) swprintf(logPath, MAX_PATH, L"%scoop_net.%d.log", root, g_instance);

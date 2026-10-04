@@ -561,6 +561,14 @@ imports when production mode is active. A local Steam launch confirmed both impo
 `SteamMatchmaking` interface was proxied. The remaining acceptance gate is a fresh remote test proving that the host
 creates and tags a four-member lobby, retains invite availability after Player 2 joins, and admits Players 3 and 4.
 
+The first Alpha 4 host control then proved the repaired production path: Steam created lobby
+`01860000B6FD6A02` with limit four and `dr2_4p_protocol=1`. Steam's friend-facing invite controls were still absent
+because vanilla requested `k_ELobbyTypeInvisible` (`3`), which Steam documents as searchable but not visible to
+friends. Alpha 5 maps only that production lobby type to `k_ELobbyTypePublic` (`2`) and intercepts later type changes
+with the same policy. It also changes the SetLobbyData, SetLobbyMemberLimit, and SetLobbyType wrappers from Win32
+`BOOL` to the Steamworks C++ `bool` ABI; the prior mismatch produced garbage-looking nonzero return values and could
+misclassify a failed call as successful. Remote friend visibility and four-peer admission remain the acceptance test.
+
 The active gates after `20261001_141156` are attributable combat for P1-P4,
 replicated damage, genuine KO and teammate revive, a game-authored save/load,
 disconnect/rejoin recovery, broader campaign scripting, production Steam peers,

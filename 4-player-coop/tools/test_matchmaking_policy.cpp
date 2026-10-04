@@ -5,12 +5,18 @@
 
 int main() {
   static_assert(coop_matchmaking::kMemberLimit == 4, "four-player lobby limit changed");
+  static_assert(coop_matchmaking::kPublicLobbyType == 2, "Steam public lobby value changed");
+  static_assert(coop_matchmaking::kInvisibleLobbyType == 3, "Steam invisible lobby value changed");
   assert(strcmp(coop_matchmaking::kProtocolKey, "dr2_4p_protocol") == 0);
   assert(coop_matchmaking::IsCompatible("1"));
   assert(!coop_matchmaking::IsCompatible(nullptr));
   assert(!coop_matchmaking::IsCompatible(""));
   assert(!coop_matchmaking::IsCompatible("0"));
   assert(!coop_matchmaking::IsCompatible("2"));
+  assert(coop_matchmaking::VisibleProductionLobbyType(3) == 2);
+  assert(coop_matchmaking::VisibleProductionLobbyType(2) == 2);
+  assert(coop_matchmaking::VisibleProductionLobbyType(1) == 1);
+  assert(coop_matchmaking::VisibleProductionLobbyType(0) == 0);
   assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamMatchmaking"));
   assert(coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamAPI_RunCallbacks"));
   assert(!coop_matchmaking::IsRequiredProductionImport("steam_api.dll", "SteamNetworking"));
