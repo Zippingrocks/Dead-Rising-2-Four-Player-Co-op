@@ -16,17 +16,17 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
 - Separate clothing storage prevents the original Players 3/4 allocation crash. Actor-local wardrobe calls now
   preserve Players 1/2, give Player 3 a full TIR suit, and give Player 4 a yellow TIR jacket; the four-instance
   visual test passed and all temporary content was restored.
-- Attributable four-owner combat, damage, KO/revive, complete partner HUD behavior, campaign-wide scripting,
-  and production Steam session validation remain unfinished.
+- User-supervised local testing passed four-owner combat, replicated damage, KO, and teammate revive behavior.
+  Complete partner HUD behavior, campaign-wide scripting, and production Steam session validation remain unfinished.
 - The production runtime is now always four-player when `four_player_coop.ini` is installed. It adds the strict
   `dr2_4p_protocol=1` Steam lobby filter, advertises the same tag on hosted lobbies, forces a four-member limit,
   publishes it per member, and rejects incompatible outgoing or incoming joins. Vanilla menus are unchanged. Remote
   Steam behavior still needs live validation.
-- An alpha release builder now produces a hash-manifested drag-and-drop ZIP. Its mod DLL and marker config sit at the
-  archive root so testers can copy them directly beside `deadrising2.exe` without running an installer.
+- An alpha release builder now produces a hash-manifested drag-and-drop ZIP containing one top-level
+  `Dead Rising 2` folder. Testers merge that folder into Steam's `steamapps\common` directory without an installer.
 
-**Next target:** complete the formal combat and revive gate without regressing the proven transition/control path,
-then validate the production Steam session and protocol filter across the remote test group. See
+**Next target:** validate the production Steam session, protocol filter, and proven gameplay behavior across the
+remote four-person test group. See
 [current state](4-player-coop/docs/current-state.md),
 [gameplay validation](4-player-coop/docs/four-player-gameplay-validation.md), and
 [network-file ownership](4-player-coop/docs/nfs-multi-client-ownership.md).
@@ -85,7 +85,7 @@ Historical run names and hashes in the research docs identify local evidence, no
 `4-player-coop/builds/releases/`. The ZIP contains only the mod DLL, marker config, hash manifest, version, and
 instructions; it never contains the game executable, archives, saves, symbols, or other Capcom content.
 
-Each tester drags `dinput8.dll` and `four_player_coop.ini` from the same ZIP into the folder containing
-`deadrising2.exe` while the game is closed, then uses the stock co-op menus. The exact protocol filter keeps this alpha
+Each tester drags the ZIP's `Dead Rising 2` folder into Steam's `steamapps\common` directory while the game is closed,
+merges it with the existing game folder, then uses the stock co-op menus. The exact protocol filter keeps this alpha
 pool separate from vanilla DR2 and incompatible mod builds, subject to the pending real-Steam validation. Removing the
 mod means deleting those two extra files. Steam verification repairs official files but normally leaves extra files.

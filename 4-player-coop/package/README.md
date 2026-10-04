@@ -6,10 +6,13 @@ It does not contain Capcom game files. Every participant must own the game and u
 ## Drag-And-Drop Install
 
 1. Close every Dead Rising 2 instance.
-2. In Steam, open Dead Rising 2's Properties, select Installed Files, then Browse.
-3. Open the ZIP and drag `dinput8.dll` and `four_player_coop.ini` beside `deadrising2.exe`.
+2. Open the ZIP. It contains one top-level folder named `Dead Rising 2`.
+3. Drag that folder into your Steam `steamapps\common` directory and approve merging it with the existing
+   `Dead Rising 2` folder. No official game file is replaced.
 4. Start Dead Rising 2 normally through Steam.
 5. Use the stock `JOIN CO-OP GAME` flow. There is no extra menu button.
+
+After merging, `dinput8.dll` and `four_player_coop.ini` must be beside `deadrising2.exe`.
 
 The release manifest contains SHA-256 hashes for both mod files. Do not combine this alpha with another mod that also
 uses `dinput8.dll`; Windows can load only one file with that name from the game directory.
@@ -30,6 +33,7 @@ files first if you want the mod completely gone.
 - Do not mix proxy-DLL mods during the first remote tests.
 - Keep saves backed up; this is an alpha runtime.
 - Record which player hosted, lobby/join order, area transitions, disconnects, crashes, and whether each player
-  retained movement, camera, inventory, combat, damage, KO, and revive behavior.
+  retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
+  local four-instance test; this group is validating them across real Steam PCs.
 
 Current release protocol: `1`.

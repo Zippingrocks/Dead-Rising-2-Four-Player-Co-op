@@ -21,6 +21,7 @@ $runtimeOutput = Join-Path $buildRoot "release-runtime"
 $stagingParent = Join-Path $buildRoot "release-staging"
 $releaseName = "Dead-Rising-2-Four-Player-Co-op-$version"
 $staging = Join-Path $stagingParent $releaseName
+$payloadRoot = Join-Path $staging "Dead Rising 2"
 $zipPath = Join-Path $OutputDir "$releaseName.zip"
 
 foreach ($path in @($runtimeOutput, $stagingParent, $OutputDir)) {
@@ -34,20 +35,20 @@ if (Test-Path -LiteralPath $staging) {
     }
     Remove-Item -LiteralPath $resolvedStaging -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $staging | Out-Null
+New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
 
 $buildScript = Join-Path $repoRoot "tools\case-zero-runtime\build.ps1"
 $builtDll = & $buildScript -OutputDir $runtimeOutput -VcVarsPath $VcVarsPath | Select-Object -Last 1
 if (-not (Test-Path -LiteralPath $builtDll)) { throw "Runtime build did not produce dinput8.dll." }
 
 foreach ($name in @("README.md", "VERSION")) {
-    Copy-Item -LiteralPath (Join-Path $packageSource $name) -Destination (Join-Path $staging $name)
+    Copy-Item -LiteralPath (Join-Path $packageSource $name) -Destination (Join-Path $payloadRoot $name)
 }
-Copy-Item -LiteralPath $builtDll -Destination (Join-Path $staging "dinput8.dll")
-Copy-Item -LiteralPath (Join-Path $packageSource "four_player_coop.ini") -Destination (Join-Path $staging "four_player_coop.ini")
+Copy-Item -LiteralPath $builtDll -Destination (Join-Path $payloadRoot "dinput8.dll")
+Copy-Item -LiteralPath (Join-Path $packageSource "four_player_coop.ini") -Destination (Join-Path $payloadRoot "four_player_coop.ini")
 
-$dllHash = (Get-FileHash -LiteralPath (Join-Path $staging "dinput8.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
-$configHash = (Get-FileHash -LiteralPath (Join-Path $staging "four_player_coop.ini") -Algorithm SHA256).Hash.ToUpperInvariant()
+$dllHash = (Get-FileHash -LiteralPath (Join-Path $payloadRoot "dinput8.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
+$configHash = (Get-FileHash -LiteralPath (Join-Path $payloadRoot "four_player_coop.ini") -Algorithm SHA256).Hash.ToUpperInvariant()
 $manifest = [ordered]@{
     schemaVersion = 1
     name = "Dead Rising 2 Four-Player Co-op"
@@ -61,10 +62,10 @@ $manifest = [ordered]@{
         "four_player_coop.ini" = [ordered]@{ sha256 = $configHash }
     }
 }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $staging "manifest.json") -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $payloadRoot "manifest.json") -Encoding UTF8
 
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zipPath -CompressionLevel Optimal
+Compress-Archive -Path $payloadRoot -DestinationPath $zipPath -CompressionLevel Optimal
 
 $result = [ordered]@{
     release = $zipPath
