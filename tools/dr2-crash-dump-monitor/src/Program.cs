@@ -21,6 +21,8 @@ internal static unsafe class Program
 
     private const uint EXCEPTION_BREAKPOINT = 0x80000003;
     private const uint EXCEPTION_SINGLE_STEP = 0x80000004;
+    private const uint STATUS_WX86_SINGLE_STEP = 0x4000001E;
+    private const uint STATUS_WX86_BREAKPOINT = 0x4000001F;
 
     private const uint PROCESS_QUERY_INFORMATION = 0x0400;
     private const uint PROCESS_VM_READ = 0x0010;
@@ -308,7 +310,13 @@ internal static unsafe class Program
                             var r = e.u.Exception.ExceptionRecord;
                             var firstChance = e.u.Exception.dwFirstChance != 0;
                             var exceptionInformation = GetExceptionInformation(r);
-                            var shouldDump = dumpCount < options.MaxDumps && (!firstChance || options.FirstChanceDumpCodes.Contains(r.ExceptionCode));
+                            var wow64DebuggerControl = r.ExceptionCode == STATUS_WX86_BREAKPOINT ||
+                                r.ExceptionCode == STATUS_WX86_SINGLE_STEP;
+                            var debuggerControl = wow64DebuggerControl ||
+                                (firstChance && (r.ExceptionCode == EXCEPTION_BREAKPOINT ||
+                                                 r.ExceptionCode == EXCEPTION_SINGLE_STEP));
+                            var shouldDump = !debuggerControl && dumpCount < options.MaxDumps &&
+                                (!firstChance || options.FirstChanceDumpCodes.Contains(r.ExceptionCode));
                             string? dumpPath = null;
                             var dumpOk = false;
                             var dumpError = 0;
@@ -337,15 +345,14 @@ internal static unsafe class Program
                                 address = Ptr(r.ExceptionAddress),
                                 parameterCount = r.NumberParameters,
                                 exceptionInformation,
+                                debuggerControl,
                                 dumped = dumpOk,
                                 dumpCount,
                                 dumpPath,
                                 dumpError = shouldDump && !dumpOk ? (int?)dumpError : null
                             });
 
-                            continueStatus = firstChance && (r.ExceptionCode == EXCEPTION_BREAKPOINT || r.ExceptionCode == EXCEPTION_SINGLE_STEP)
-                                ? DBG_CONTINUE
-                                : DBG_EXCEPTION_NOT_HANDLED;
+                            continueStatus = debuggerControl ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
                             break;
 
                         default:

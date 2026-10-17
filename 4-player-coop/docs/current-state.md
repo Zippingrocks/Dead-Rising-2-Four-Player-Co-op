@@ -688,6 +688,15 @@ requests lobby data, and lets a metadata-empty direct join begin provisionally. 
 still requires exact lobby and peer protocol proof before any gameplay connection is accepted, while explicit
 protocol mismatches continue to fail closed.
 
+The first Alpha 18 retry at `16:28:58` proved the provisional path reached Steam's real join for lobby
+`0186000015E2CC60`: `RequestLobbyData` succeeded and DR2 began reading stock lobby fields. The subsequent process
+termination was caused by the local crash watcher, not the mod or host. Steam raised the documented WOW64 debugger
+control status `STATUS_WX86_BREAKPOINT (0x4000001F)` during the join. The watcher treated it as an unhandled
+second-chance fault, wrote a 958 MB dump, and caused process exit `0x4000001F`. The monitor now consumes WOW64
+breakpoint and single-step statuses without dumping them, matching its handling of ordinary debugger control events.
+All 178 Python tests, 56 subtests, and the monitor Release build pass. Repeat Alpha 18 unchanged under the corrected
+watcher before changing matchmaking behavior again.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.
