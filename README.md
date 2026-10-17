@@ -91,5 +91,5 @@ merges it with the existing game folder, then uses the stock co-op menus. The ex
 pool separate from vanilla DR2 and incompatible mod builds, subject to the pending real-Steam validation. Removing the
 mod means deleting those two extra files. Steam verification repairs official files but normally leaves extra files.
 
-Alpha 16 draws a small status dot in DR2's top-left corner. Red means the production runtime is broken or still
+Alpha 17 draws a small status dot in DR2's top-left corner. Red means the production runtime is broken or still
 initializing; green means its Steam interfaces and required four-player engine patches are active.

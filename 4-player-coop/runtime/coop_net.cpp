@@ -2629,14 +2629,38 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
   const unsigned long long filteredLobby = static_cast<unsigned long long>(
       InterlockedCompareExchange64(&g_productionFilteredLobby, 0, 0));
   const bool filteredCandidate = lobby != 0 && lobby == filteredLobby;
-  if (!coop_matchmaking::ShouldJoinLobby(protocol, filteredCandidate)) {
-    Log("production matchmaking: rejected incompatible lobby=%08lX%08lX protocol='%s'",
-        static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>");
+  unsigned long long owner = 0;
+  const char* ownerPresenceProtocol = nullptr;
+  void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+  if (coop_matchmaking::IsMissing(protocol) && friends) {
+    using GetOwner_t = void*(__thiscall*)(void*, unsigned long long*, unsigned long long);
+    RealMethod<GetOwner_t>(proxy, 35)(proxy->real, &owner, lobby);
+    if (owner) {
+      void** friendMethods = *reinterpret_cast<void***>(friends);
+      using GetPresence_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+      ownerPresenceProtocol = reinterpret_cast<GetPresence_t>(
+          friendMethods[coop_matchmaking::kFriendsGetFriendRichPresenceSlot])(
+          friends, owner, coop_matchmaking::kProtocolKey);
+      if (coop_matchmaking::IsMissing(ownerPresenceProtocol)) {
+        using RequestPresence_t = void(__thiscall*)(void*, unsigned long long);
+        reinterpret_cast<RequestPresence_t>(
+            friendMethods[coop_matchmaking::kFriendsRequestFriendRichPresenceSlot])(friends, owner);
+      }
+    }
+  }
+  if (!coop_matchmaking::ShouldJoinLobby(protocol, filteredCandidate, ownerPresenceProtocol)) {
+    Log("production matchmaking: rejected incompatible lobby=%08lX%08lX protocol='%s' "
+        "filteredCandidate=%d owner=%08lX%08lX ownerPresence='%s'",
+        static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>",
+        filteredCandidate, static_cast<DWORD>(owner >> 32), static_cast<DWORD>(owner),
+        ownerPresenceProtocol ? ownerPresenceProtocol : "<null>");
     return 0;
   }
-  Log("production matchmaking: accepted lobby=%08lX%08lX protocol='%s' filteredCandidate=%d",
+  Log("production matchmaking: accepted lobby=%08lX%08lX protocol='%s' filteredCandidate=%d "
+      "owner=%08lX%08lX ownerPresence='%s'",
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>",
-      filteredCandidate);
+      filteredCandidate, static_cast<DWORD>(owner >> 32), static_cast<DWORD>(owner),
+      ownerPresenceProtocol ? ownerPresenceProtocol : "<null>");
   InterlockedExchange64(&g_productionPendingPeer, 0);
   InterlockedExchange64(&g_productionDeferredPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);

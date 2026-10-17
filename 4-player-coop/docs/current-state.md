@@ -675,6 +675,12 @@ may proceed when that authenticated candidate's metadata is temporarily missing;
 missing metadata remain rejected. This closes the client-side Steam lobby-data cache race without admitting vanilla
 lobbies.
 
+The October 17 direct attempt to join Lacey's recovered host reached `JoinLobby` with lobby ID
+`0186000015CC0AB8` but empty lobby protocol metadata. Because Steam's direct/invite path did not enumerate that ID
+through `GetLobbyByIndex`, Alpha 16 rejected it before host traffic. Alpha 17 retains the same protocol and validates
+that path through the lobby owner's exact protocol-7 rich presence, requesting delayed presence and requiring a
+subsequent retry instead of admitting an unproven lobby.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.

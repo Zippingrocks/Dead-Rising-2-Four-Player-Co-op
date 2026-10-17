@@ -107,4 +107,8 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.16`. Network protocol: `7`.
+Alpha 17 also authenticates direct Steam/invite joins through the lobby owner's protocol-7 rich presence when Steam
+has not populated lobby metadata yet. Missing owner presence is requested and the attempt remains rejected until
+proof arrives; explicit protocol mismatches still fail closed.
+
+Current release: `0.1.0-alpha.17`. Network protocol: `7`.
