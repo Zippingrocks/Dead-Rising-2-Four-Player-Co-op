@@ -54,7 +54,8 @@ bool g_trace = false;
 bool g_harness = false;
 bool g_production = false;
 bool g_baseGameDlcCompatibility = false;
-bool g_showStartupIndicator = false;
+bool g_showStatusIndicator = false;
+volatile LONG g_productionPatchFailed = 0;
 void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
@@ -5130,6 +5131,7 @@ DWORD WINAPI ProductionPatchThread(LPVOID) {
     Sleep(100);
   }
   Log("production co-op: native signatures never became available; admission remains disabled");
+  InterlockedExchange(&g_productionPatchFailed, 1);
   return 0;
 }
 
@@ -5653,20 +5655,6 @@ DWORD WINAPI PatchThread(LPVOID) {
   return 0;
 }
 
-DWORD WINAPI StartupIndicatorThread(LPVOID) {
-  Sleep(2500);
-  wchar_t message[384];
-  swprintf_s(message,
-      L"Four-Player Co-op is ACTIVE.\n\nRelease: %ls\nNetwork protocol: %S\n\n"
-      L"Every player should see this message and use the same release.",
-      coop_release::kVersionWide, coop_matchmaking::kProtocolValue);
-  Log("startup indicator: displayed release=%s protocol=%s", coop_release::kVersion,
-      coop_matchmaking::kProtocolValue);
-  MessageBoxW(nullptr, message, L"Dead Rising 2 Four-Player Co-op ACTIVE",
-      MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
-  return 0;
-}
-
 int ArgumentInt(const wchar_t* commandLine, const wchar_t* prefix, int fallback) {
   const wchar_t* found = wcsstr(commandLine, prefix);
   return found ? _wtoi(found + wcslen(prefix)) : fallback;
@@ -5688,8 +5676,8 @@ void Initialize(const wchar_t* root) {
       GetPrivateProfileIntW(L"FourPlayerCoop", L"Enabled", 1, productionIni) != 0;
   g_baseGameDlcCompatibility = g_production &&
       GetPrivateProfileIntW(L"FourPlayerCoop", L"BaseGameDlcCompatibility", 1, productionIni) != 0;
-  g_showStartupIndicator = g_production &&
-      GetPrivateProfileIntW(L"FourPlayerCoop", L"ShowStartupIndicator", 1, productionIni) != 0;
+  g_showStatusIndicator = g_production &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"ShowStatusIndicator", 1, productionIni) != 0;
   g_silent = g_harness && wcsstr(commandLine, L"-coopsilent") != nullptr;
   g_isolatedDesktop = g_harness && wcsstr(commandLine, L"-coopdesktop") != nullptr;
   g_instance = ArgumentInt(commandLine, L"-coopinstance=", 0);
@@ -5797,16 +5785,14 @@ void Initialize(const wchar_t* root) {
   if (g_instance > 0) swprintf(logPath, MAX_PATH, L"%scoop_net.%d.log", root, g_instance);
   else swprintf(logPath, MAX_PATH, L"%scoop_net.log", root);
   g_log = _wfsopen(logPath, L"w", _SH_DENYWR);
-  Log("co-op runtime loaded: trace=%d harness=%d production=%d silent=%d instance=%d requestedPlayers=%d pid=%lu",
-      g_trace, g_harness, g_production, g_silent, g_instance, g_requestedPlayers, GetCurrentProcessId());
+  Log("co-op runtime loaded: release=%s protocol=%s trace=%d harness=%d production=%d silent=%d "
+      "instance=%d requestedPlayers=%d pid=%lu",
+      coop_release::kVersion, coop_matchmaking::kProtocolValue, g_trace, g_harness, g_production, g_silent,
+      g_instance, g_requestedPlayers, GetCurrentProcessId());
   if (g_directP2PProbe) Log("direct transport: stockLayout=%d", g_stockTransport);
   if (g_harness) StartLocalBus();
   PatchImports();
   if (g_production) {
-    if (g_showStartupIndicator) {
-      HANDLE indicator = CreateThread(nullptr, 0, StartupIndicatorThread, nullptr, 0, nullptr);
-      if (indicator) CloseHandle(indicator);
-    }
     HANDLE productionPatches = CreateThread(nullptr, 0, ProductionPatchThread, nullptr, 0, nullptr);
     if (productionPatches) CloseHandle(productionPatches);
   }
@@ -5834,6 +5820,18 @@ void Initialize(const wchar_t* root) {
 }
 
 bool IsHarness() { return g_harness; }
+bool StatusIndicatorEnabled() { return g_showStatusIndicator; }
+int ProductionStatus() {
+  if (!g_showStatusIndicator || !g_production) return 0;
+  if (InterlockedCompareExchange(&g_productionPatchFailed, 0, 0)) return 1;
+  const bool steamReady = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr) &&
+      InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+  const bool patchesReady = InterlockedCompareExchange(&g_campaignAdmissionCapacityInstalled, 0, 0) &&
+      InterlockedCompareExchange(&g_productionEngineCapacityInstalled, 0, 0) &&
+      InterlockedCompareExchange(&g_productionLocalServerTraceInstalled, 0, 0) &&
+      InterlockedCompareExchange(&g_clientDataProbeInstalled, 0, 0);
+  return steamReady && patchesReady ? 2 : 1;
+}
 bool CampaignActivationPending() { return CampaignActivationPendingInternal(); }
 void ActivateCampaignActorsOnCurrentThread() { ActivateCampaignActorsOnCurrentThreadInternal(); }
 bool ConnectionMeshInitPending() { return ConnectionMeshInitPendingInternal(); }

@@ -31,6 +31,8 @@
 namespace coop {
 void Initialize(const wchar_t* root);
 bool IsHarness();
+bool StatusIndicatorEnabled();
+int ProductionStatus();
 bool CampaignActivationPending();
 void ActivateCampaignActorsOnCurrentThread();
 bool ConnectionMeshInitPending();
@@ -740,6 +742,26 @@ HRESULT __stdcall Hook_Present(void* device, const RECT* source, const RECT* des
     g_nextHarnessPresent = GetTickCount() + g_harnessFrameMs;
   }
   TryCaptureHarnessFrame(device);
+  if (coop::StatusIndicatorEnabled()) {
+    auto* d3d = static_cast<IDirect3DDevice9*>(device);
+    D3DVIEWPORT9 viewport{};
+    if (SUCCEEDED(d3d->GetViewport(&viewport)) && viewport.Width >= 32 && viewport.Height >= 32) {
+      const LONG x = static_cast<LONG>(viewport.X) + 12;
+      const LONG y = static_cast<LONG>(viewport.Y) + 12;
+      const D3DRECT outer[] = {
+          {x + 5, y, x + 11, y + 2}, {x + 2, y + 2, x + 14, y + 5},
+          {x, y + 5, x + 16, y + 11}, {x + 2, y + 11, x + 14, y + 14},
+          {x + 5, y + 14, x + 11, y + 16}};
+      const D3DRECT inner[] = {
+          {x + 6, y + 3, x + 10, y + 5}, {x + 4, y + 5, x + 12, y + 11},
+          {x + 6, y + 11, x + 10, y + 13}};
+      d3d->Clear(static_cast<DWORD>(_countof(outer)), outer, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 8, 8, 8), 1.0f, 0);
+      const D3DCOLOR statusColor = coop::ProductionStatus() == 2
+          ? D3DCOLOR_ARGB(255, 32, 224, 96)
+          : D3DCOLOR_ARGB(255, 255, 48, 48);
+      d3d->Clear(static_cast<DWORD>(_countof(inner)), inner, D3DCLEAR_TARGET, statusColor, 1.0f, 0);
+    }
+  }
   return Real_Present(device, source, destination, overrideWindow, dirtyRegion);
 }
 
@@ -865,7 +887,8 @@ HRESULT __stdcall Hook_CreateDevice(void* d3d, UINT adapter, DWORD type, HWND wi
           IsWindowVisible(window));
       Log(1, "harness window: x=%d y=%d width=640 height=360 noactivate=1 toolwindow=1", harnessX, harnessY);
     }
-    if (g_harnessFrameMs) PatchVtableSlot(*device, 17, reinterpret_cast<void*>(&Hook_Present), reinterpret_cast<void**>(&Real_Present));
+    if (g_harnessFrameMs || coop::StatusIndicatorEnabled())
+      PatchVtableSlot(*device, 17, reinterpret_cast<void*>(&Hook_Present), reinterpret_cast<void**>(&Real_Present));
     PatchVtableSlot(*device, 86, reinterpret_cast<void*>(&Hook_CreateVertexDeclaration), reinterpret_cast<void**>(&Real_CreateVertexDeclaration));
     Log(1, "d3d9: device created; vertex-declaration diagnostics active");
   }
@@ -912,7 +935,7 @@ bool WriteProtected(void* address, const void* bytes, size_t size) {
 }
 
 // Patches (or re-patches) the hooked IAT slots of the game module. Returns the number of slots now hooked.
-int PatchImports() {
+int PatchImports(bool renderOnly = false) {
   auto* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
   auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
   auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
@@ -928,6 +951,7 @@ int PatchImports() {
       if (IMAGE_SNAP_BY_ORDINAL32(names->u1.Ordinal)) continue;
       const char* importName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData)->Name;
       for (auto& hook : g_hooks) {
+        if (renderOnly && hook.hook != reinterpret_cast<void*>(Hook_Direct3DCreate9)) continue;
         if (_stricmp(dllName, hook.dll) != 0 || strcmp(importName, hook.name) != 0) continue;
         void* current = reinterpret_cast<void*>(static_cast<ULONG_PTR>(slots->u1.Function));
         if (current == hook.hook) {
@@ -1858,6 +1882,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
   InitializeCriticalSection(&g_logLock);
   LoadConfiguration();
   coop::Initialize(g_root);
+  if (coop::StatusIndicatorEnabled()) PatchImports(true);
   // Multiplayer test clients must exercise the stock DR2 frontend. Loading the additive Case Zero campaign selector
   // here makes startup slower and can hide vanilla lobby behavior behind unrelated replacement assets.
   if (coop::IsHarness()) g_launcher = false;

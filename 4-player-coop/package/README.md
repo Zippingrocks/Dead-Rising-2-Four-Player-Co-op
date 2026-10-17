@@ -62,10 +62,14 @@ while DR2 is exchanging game data, even though DR2 has already admitted and conf
 Every participant now uses DR2's occupied native client records as the authoritative growth signal and Steam's count as
 a fallback, ensuring command 3 is resent after the third or fourth record appears. Alpha 10 uses network protocol `4`.
 
-Alpha 11 adds a clear one-time startup confirmation containing the release and network protocol. Every tester should
-see it after launching DR2; if it does not appear, the mod did not load from that installation. This diagnostic-only
-release remains on network protocol `4` and is compatible with Alpha 10. Set `ShowStartupIndicator=0` in
-`four_player_coop.ini` to disable the confirmation after testing.
+Alpha 11 added a clear one-time startup confirmation containing the release and network protocol. This
+diagnostic-only release remained on network protocol `4` and compatible with Alpha 10.
+
+Alpha 12 replaces that modal confirmation with a small permanent status dot in the top-left corner of DR2. Red means
+the production runtime is broken or has not finished initializing; green means the Steam interfaces and all required
+four-player engine patches are active. The dot is drawn directly onto the Direct3D backbuffer and never captures input
+or changes game/network state. Set `ShowStatusIndicator=0` in `four_player_coop.ini` to hide it. Alpha 12 remains on
+network protocol `4`.
 
 ## Remove Or Reset
 
@@ -82,4 +86,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.11`. Network protocol: `4`.
+Current release: `0.1.0-alpha.12`. Network protocol: `4`.
