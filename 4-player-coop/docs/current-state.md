@@ -655,6 +655,12 @@ Steam continued reporting the old lobby-member count during the exchange phase. 
 the occupied native four-record client table as the authoritative growth signal on every participant, retaining the
 Steam count only as a fallback. This directly targets the reproduced stall without changing the proven admission path.
 
+The October 17 two-player production control reached native acceptance and mutual record confirmation twice, then
+stalled at `Attempting to load game`. A read-only snapshot showed `singlePlayer=1`, mesh state 1 with zero players,
+all flow/sync bytes clear, and no network-file request. Alpha 13/protocol 5 promotes the harness-proven
+`cP2PClient::SinglePlayerToMultiPlayer` conversion into production after at least two occupied native records are
+mutually confirmed, invoking it only from the Steam callback/game thread with the retail function signature checked.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.

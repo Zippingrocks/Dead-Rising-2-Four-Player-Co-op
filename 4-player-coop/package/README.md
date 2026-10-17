@@ -71,6 +71,13 @@ four-player engine patches are active. The dot is drawn directly onto the Direct
 or changes game/network state. Set `ShowStatusIndicator=0` in `four_player_coop.ini` to hide it. Alpha 12 remains on
 network protocol `4`.
 
+Alpha 13 fixes the two-player production stall captured on October 17. Steam transport connected and both native
+records confirmed, but DR2 remained in single-player mode with an uninitialized mesh and never emitted its first flow
+command. Once at least two occupied native records are mutually confirmed, Alpha 13 invokes DR2's signature-checked
+`cP2PClient::SinglePlayerToMultiPlayer` on the Steam callback/game thread. This is the same native conversion and
+thread ownership already proven by the four-instance harness. Alpha 13 uses network protocol `5`; every participant
+must update.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -86,4 +93,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.12`. Network protocol: `4`.
+Current release: `0.1.0-alpha.13`. Network protocol: `5`.

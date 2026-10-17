@@ -6,7 +6,7 @@ namespace coop_matchmaking {
 
 // Increment this value whenever network-visible behavior becomes incompatible.
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
-constexpr char kProtocolValue[] = "4";
+constexpr char kProtocolValue[] = "5";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;

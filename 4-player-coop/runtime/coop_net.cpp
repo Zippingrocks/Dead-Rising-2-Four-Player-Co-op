@@ -195,6 +195,9 @@ bool InstallJoinPolicyTrace(BYTE* base);
 volatile LONG g_joinPolicyInstalled = 0;
 volatile LONG g_lobbyFrontendObserverStarted = 0;
 bool StartLobbyFrontendObserver();
+void TryActivateCampaignActors(BYTE* base, BYTE* p2p);
+bool CampaignActivationPendingInternal();
+void ActivateCampaignActorsOnCurrentThreadInternal();
 void Log(const char* format, ...);
 bool WriteSlot(void* address, const void* bytes, size_t size);
 
@@ -2578,6 +2581,8 @@ unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, i
   InterlockedExchangePointer(&g_productionLocalServer, nullptr);
   InterlockedExchange64(&g_productionPendingPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
+  InterlockedExchange(&g_campaignActivationState, 0);
+  InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&g_campaignActivationP2P), nullptr);
   SetProductionCollectionTarget(2, "new host lobby");
   Log("production matchmaking: CreateLobby requestedType=%d effectiveType=%d limit=%d", type, visibleType,
       coop_matchmaking::kMemberLimit);
@@ -2597,6 +2602,8 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby));
   InterlockedExchange64(&g_productionPendingPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
+  InterlockedExchange(&g_campaignActivationState, 0);
+  InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&g_campaignActivationP2P), nullptr);
   InterlockedExchange64(&g_productionLobby, static_cast<LONG64>(lobby));
   return RealMethod<Join_t>(proxy, 14)(proxy->real, lobby);
 }
@@ -3479,6 +3486,28 @@ LONG ProductionNativeMemberCount() {
   return occupied;
 }
 
+bool ProductionNativePeersConfirmed() {
+  void* server = InterlockedCompareExchangePointer(&g_clientDataServer, nullptr, nullptr);
+  LONG allocated = InterlockedCompareExchange(&g_clientDataCount, 0, 0);
+  if (!server || allocated < 2) return false;
+  if (allocated > coop_matchmaking::kMemberLimit) allocated = coop_matchmaking::kMemberLimit;
+
+  LONG occupied = 0;
+  __try {
+    BYTE* records = *reinterpret_cast<BYTE**>(static_cast<BYTE*>(server) + 0x54);
+    if (!records) return false;
+    for (LONG index = 0; index < allocated; index++) {
+      BYTE* record = records + index * 0x48;
+      if (*reinterpret_cast<unsigned long long*>(record) == 0) continue;
+      occupied++;
+      if (record[0x0C] != 1 || record[0x0D] != 0) return false;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+  return occupied >= 2;
+}
+
 bool TrySignalProductionFlowCommand(LONG steamMemberCount) {
   const LONG nativeMemberCount = ProductionNativeMemberCount();
   const LONG memberCount = coop_matchmaking::EffectiveMemberCount(nativeMemberCount, steamMemberCount);
@@ -3573,6 +3602,15 @@ void __cdecl Hook_RunCallbacksImpl() {
         reinterpret_cast<SetMemberData_t>(methods[25])(
           matchmaking, lobby, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue);
       }
+    }
+    BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+    __try {
+      BYTE* online = *reinterpret_cast<BYTE**>(base + (0x00E5F428 - 0x00400000));
+      BYTE* p2p = online ? *reinterpret_cast<BYTE**>(online + 0xD8) : nullptr;
+      TryActivateCampaignActors(base, p2p);
+      if (CampaignActivationPendingInternal()) ActivateCampaignActorsOnCurrentThreadInternal();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      Log("production activation: callback snapshot fault=%08lX", GetExceptionCode());
     }
   }
   if (g_harness) {
@@ -4226,8 +4264,10 @@ void LogCampaignActorState(BYTE* p2p) {
 }
 
 void TryActivateCampaignActors(BYTE* base, BYTE* p2p) {
-  if (!g_actorActivationProbe || InterlockedCompareExchange(&g_campaignActivationState, 0, 0) != 0 ||
-      !AllHarnessPeersConfirmed()) return;
+  const bool harnessReady = g_actorActivationProbe && AllHarnessPeersConfirmed();
+  const bool productionReady = g_production && ProductionNativePeersConfirmed();
+  if ((!harnessReady && !productionReady) ||
+      InterlockedCompareExchange(&g_campaignActivationState, 0, 0) != 0) return;
   BYTE* client = p2p ? *reinterpret_cast<BYTE**>(p2p + 0x38) : nullptr;
   BYTE* localNode = client ? *reinterpret_cast<BYTE**>(client + 0x90) : nullptr;
   if (!client || !localNode || client[0x9D] == 0) return;
@@ -4246,7 +4286,8 @@ void TryActivateCampaignActors(BYTE* base, BYTE* p2p) {
 }
 
 bool CampaignActivationPendingInternal() {
-  return g_actorActivationProbe && InterlockedCompareExchange(&g_campaignActivationState, 0, 0) == 1;
+  return (g_actorActivationProbe || g_production) &&
+      InterlockedCompareExchange(&g_campaignActivationState, 0, 0) == 1;
 }
 
 void ActivateCampaignActorsOnCurrentThreadInternal() {
