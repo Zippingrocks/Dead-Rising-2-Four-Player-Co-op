@@ -30,6 +30,10 @@ inline bool IsMissing(const char* value) {
   return !value || value[0] == '\0';
 }
 
+inline bool ShouldJoinLobby(const char* lobbyProtocol, bool exactFilteredCandidate) {
+  return IsCompatible(lobbyProtocol) || (IsMissing(lobbyProtocol) && exactFilteredCandidate);
+}
+
 inline bool HasPeerProof(const char* memberProtocol, const char* richPresenceProtocol) {
   if (!IsMissing(memberProtocol)) return IsCompatible(memberProtocol);
   return IsCompatible(richPresenceProtocol);

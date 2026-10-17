@@ -61,6 +61,8 @@ void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
 __declspec(align(8)) volatile LONG64 g_productionPendingPeer = 0;
 __declspec(align(8)) volatile LONG64 g_productionDeferredPeer = 0;
+__declspec(align(8)) volatile LONG64 g_productionFilteredLobby = 0;
+volatile LONG g_productionFilteredDiscovery = 0;
 volatile LONG g_productionFlowSignalMembers = 2;
 bool g_silent = false;
 bool g_isolatedDesktop = false;
@@ -2580,9 +2582,28 @@ unsigned long long __fastcall Mod_Matchmaking_RequestLobbyList(Proxy* proxy, voi
   using Request_t = unsigned long long(__thiscall*)(void*);
   RealMethod<AddFilter_t>(proxy, 5)(proxy->real, coop_matchmaking::kProtocolKey,
       coop_matchmaking::kProtocolValue, 0);
+  InterlockedExchange64(&g_productionFilteredLobby, 0);
+  InterlockedExchange(&g_productionFilteredDiscovery, 1);
   Log("production matchmaking: required %s=%s", coop_matchmaking::kProtocolKey,
       coop_matchmaking::kProtocolValue);
   return RealMethod<Request_t>(proxy, 4)(proxy->real);
+}
+
+void* __fastcall Mod_Matchmaking_GetLobbyByIndex(Proxy* proxy, void*, unsigned long long* output,
+                                                  int index) {
+  using Method_t = void*(__thiscall*)(void*, unsigned long long*, int);
+  void* result = RealMethod<Method_t>(proxy, 12)(proxy->real, output, index);
+  const unsigned long long lobby = output ? *output : 0;
+  if (lobby && InterlockedCompareExchange(&g_productionFilteredDiscovery, 0, 0)) {
+    InterlockedExchange64(&g_productionFilteredLobby, static_cast<LONG64>(lobby));
+    using GetData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+    const char* protocol = RealMethod<GetData_t>(proxy, 19)(
+        proxy->real, lobby, coop_matchmaking::kProtocolKey);
+    Log("production matchmaking: authorized filtered candidate index=%d lobby=%08lX%08lX protocol='%s'",
+        index, static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby),
+        protocol ? protocol : "<null>");
+  }
+  return result;
 }
 
 unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, int type, int) {
@@ -2605,13 +2626,17 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
   using GetData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
   using Join_t = unsigned long long(__thiscall*)(void*, unsigned long long);
   const char* protocol = RealMethod<GetData_t>(proxy, 19)(proxy->real, lobby, coop_matchmaking::kProtocolKey);
-  if (!coop_matchmaking::IsCompatible(protocol)) {
+  const unsigned long long filteredLobby = static_cast<unsigned long long>(
+      InterlockedCompareExchange64(&g_productionFilteredLobby, 0, 0));
+  const bool filteredCandidate = lobby != 0 && lobby == filteredLobby;
+  if (!coop_matchmaking::ShouldJoinLobby(protocol, filteredCandidate)) {
     Log("production matchmaking: rejected incompatible lobby=%08lX%08lX protocol='%s'",
         static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>");
     return 0;
   }
-  Log("production matchmaking: accepted compatible lobby=%08lX%08lX",
-      static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby));
+  Log("production matchmaking: accepted lobby=%08lX%08lX protocol='%s' filteredCandidate=%d",
+      static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>",
+      filteredCandidate);
   InterlockedExchange64(&g_productionPendingPeer, 0);
   InterlockedExchange64(&g_productionDeferredPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
@@ -5869,6 +5894,7 @@ void Initialize(const wchar_t* root) {
     g_thunkTables[kFriends][7] = reinterpret_cast<void*>(Fake_Friends_GetFriendPersonaName);
   } else if (g_production) {
     g_thunkTables[kMatchmaking][4] = reinterpret_cast<void*>(Mod_Matchmaking_RequestLobbyList);
+    g_thunkTables[kMatchmaking][12] = reinterpret_cast<void*>(Mod_Matchmaking_GetLobbyByIndex);
     g_thunkTables[kMatchmaking][13] = reinterpret_cast<void*>(Mod_Matchmaking_CreateLobby);
     g_thunkTables[kMatchmaking][14] = reinterpret_cast<void*>(Mod_Matchmaking_JoinLobby);
     g_thunkTables[kMatchmaking][20] = reinterpret_cast<void*>(Mod_Matchmaking_SetLobbyData);

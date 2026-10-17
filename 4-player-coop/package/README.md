@@ -87,7 +87,10 @@ Alpha 15 fixes the real-Steam admission ordering failure observed immediately af
 arrives before Steam has propagated that peer's protocol metadata or rich presence, the host keeps the peer ID but
 still rejects the unproven request. After a later Steam callback exposes exact protocol proof, the host replays DR2's
 original `P2PSessionRequest` callback on the game thread. Vanilla and incompatible peers are never replayed or
-admitted. Alpha 15 uses network protocol `7`; every participant must update.
+admitted. Alpha 16 also fixes the earlier client-side form of that ordering race: a lobby returned by the exact
+protocol-filtered Steam query remains authorized while its lobby metadata cache catches up. Unfiltered lobbies and
+lobbies carrying a different protocol value are still rejected. Alpha 16 uses network protocol `7` and remains wire
+compatible with Alpha 15, though every participant should update for consistent client behavior.
 
 ## Remove Or Reset
 
@@ -104,4 +107,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.15`. Network protocol: `7`.
+Current release: `0.1.0-alpha.16`. Network protocol: `7`.

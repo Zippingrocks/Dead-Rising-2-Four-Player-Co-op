@@ -668,6 +668,13 @@ request before Steam exposed member metadata, rich presence, or lobby membership
 Alpha 15/protocol 7 retains that strict rejection, remembers the unproven peer, and replays DR2's registered
 `P2PSessionRequest` callback only after a later Steam callback exposes exact matching protocol proof.
 
+The next Alpha 15 attempt failed before the host received any P2P request. The host had a valid public four-member
+protocol-7 lobby and a captured callback, which isolates this failure to the client's earlier lobby join path.
+Alpha 16 keeps protocol 7 but records lobby IDs returned by the exact protocol-filtered Steam query. `JoinLobby`
+may proceed when that authenticated candidate's metadata is temporarily missing; explicit mismatches and unfiltered
+missing metadata remain rejected. This closes the client-side Steam lobby-data cache race without admitting vanilla
+lobbies.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.
