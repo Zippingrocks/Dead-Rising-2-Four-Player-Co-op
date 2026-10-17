@@ -78,6 +78,11 @@ command. Once at least two occupied native records are mutually confirmed, Alpha
 thread ownership already proven by the four-instance harness. Alpha 13 uses network protocol `5`; every participant
 must update.
 
+Alpha 14 fixes the pre-title launch regression reported by Player 2 with Alpha 13. Native campaign conversion is now
+hard-gated behind an established Steam lobby in both callback and observer paths, so startup-era DR2 online records
+cannot schedule conversion. The confirmed-peer conversion remains active after lobby admission. Alpha 14 uses network
+protocol `6`; every participant must update and Alpha 13 is intentionally excluded.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -93,4 +98,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.13`. Network protocol: `5`.
+Current release: `0.1.0-alpha.14`. Network protocol: `6`.

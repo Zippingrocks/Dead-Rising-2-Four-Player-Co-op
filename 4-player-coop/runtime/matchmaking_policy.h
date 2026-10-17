@@ -6,7 +6,7 @@ namespace coop_matchmaking {
 
 // Increment this value whenever network-visible behavior becomes incompatible.
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
-constexpr char kProtocolValue[] = "5";
+constexpr char kProtocolValue[] = "6";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;
@@ -17,6 +17,10 @@ constexpr int kFriendsGetFriendRichPresenceSlot = 39;
 constexpr int kFriendsRequestFriendRichPresenceSlot = 42;
 constexpr int kAppsBIsDlcInstalledSlot = 7;
 constexpr int kAppsBGetDlcDataByIndexSlot = 11;
+
+inline bool ShouldInspectProductionActivation(bool production, unsigned long long lobby) {
+  return production && lobby != 0;
+}
 
 inline bool IsCompatible(const char* value) {
   return value && strcmp(value, kProtocolValue) == 0;

@@ -3603,14 +3603,18 @@ void __cdecl Hook_RunCallbacksImpl() {
           matchmaking, lobby, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue);
       }
     }
-    BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
-    __try {
-      BYTE* online = *reinterpret_cast<BYTE**>(base + (0x00E5F428 - 0x00400000));
-      BYTE* p2p = online ? *reinterpret_cast<BYTE**>(online + 0xD8) : nullptr;
-      TryActivateCampaignActors(base, p2p);
-      if (CampaignActivationPendingInternal()) ActivateCampaignActorsOnCurrentThreadInternal();
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-      Log("production activation: callback snapshot fault=%08lX", GetExceptionCode());
+    // Never inspect or convert DR2's online graph during title startup. Some machines retain
+    // partially initialized native records before a Steam lobby exists.
+    if (coop_matchmaking::ShouldInspectProductionActivation(g_production, lobby)) {
+      BYTE* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+      __try {
+        BYTE* online = *reinterpret_cast<BYTE**>(base + (0x00E5F428 - 0x00400000));
+        BYTE* p2p = online ? *reinterpret_cast<BYTE**>(online + 0xD8) : nullptr;
+        TryActivateCampaignActors(base, p2p);
+        if (CampaignActivationPendingInternal()) ActivateCampaignActorsOnCurrentThreadInternal();
+      } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("production activation: callback snapshot fault=%08lX", GetExceptionCode());
+      }
     }
   }
   if (g_harness) {
@@ -4265,7 +4269,10 @@ void LogCampaignActorState(BYTE* p2p) {
 
 void TryActivateCampaignActors(BYTE* base, BYTE* p2p) {
   const bool harnessReady = g_actorActivationProbe && AllHarnessPeersConfirmed();
-  const bool productionReady = g_production && ProductionNativePeersConfirmed();
+  const unsigned long long productionLobby = static_cast<unsigned long long>(
+      InterlockedCompareExchange64(&g_productionLobby, 0, 0));
+  const bool productionReady = coop_matchmaking::ShouldInspectProductionActivation(g_production, productionLobby) &&
+      ProductionNativePeersConfirmed();
   if ((!harnessReady && !productionReady) ||
       InterlockedCompareExchange(&g_campaignActivationState, 0, 0) != 0) return;
   BYTE* client = p2p ? *reinterpret_cast<BYTE**>(p2p + 0x38) : nullptr;

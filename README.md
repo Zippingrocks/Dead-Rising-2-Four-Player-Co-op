@@ -19,7 +19,7 @@ Latest visual-identity checkpoint: `four_instance_20261001_175129`.
 - User-supervised local testing passed four-owner combat, replicated damage, KO, and teammate revive behavior.
   Complete partner HUD behavior, campaign-wide scripting, and production Steam session validation remain unfinished.
 - The production runtime is now always four-player when `four_player_coop.ini` is installed. It adds the strict
-  `dr2_4p_protocol=5` Steam lobby filter, advertises the same tag through lobby metadata and rich presence, forces a
+  `dr2_4p_protocol=6` Steam lobby filter, advertises the same tag through lobby metadata and rich presence, forces a
   four-member limit, and rejects incompatible outgoing or incoming joins. Its default base-game compatibility mode
   reports the four optional skill packs as disabled during the modded process so differing DLC ownership cannot split
   the test group. Vanilla menus are unchanged. Remote Steam behavior still needs live validation.
@@ -91,5 +91,5 @@ merges it with the existing game folder, then uses the stock co-op menus. The ex
 pool separate from vanilla DR2 and incompatible mod builds, subject to the pending real-Steam validation. Removing the
 mod means deleting those two extra files. Steam verification repairs official files but normally leaves extra files.
 
-Alpha 13 draws a small status dot in DR2's top-left corner. Red means the production runtime is broken or still
+Alpha 14 draws a small status dot in DR2's top-left corner. Red means the production runtime is broken or still
 initializing; green means its Steam interfaces and required four-player engine patches are active.

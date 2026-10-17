@@ -660,6 +660,9 @@ stalled at `Attempting to load game`. A read-only snapshot showed `singlePlayer=
 all flow/sync bytes clear, and no network-file request. Alpha 13/protocol 5 promotes the harness-proven
 `cP2PClient::SinglePlayerToMultiPlayer` conversion into production after at least two occupied native records are
 mutually confirmed, invoking it only from the Steam callback/game thread with the retail function signature checked.
+Alpha 14/protocol 6 additionally requires an established Steam lobby before either production callback or observer
+path may inspect and schedule that conversion, fixing Player 2's Alpha 13 pre-title launch regression while retaining
+the confirmed-peer transition.
 
 ## Operating Rules
 
