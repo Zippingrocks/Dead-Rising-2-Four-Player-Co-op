@@ -62,6 +62,11 @@ while DR2 is exchanging game data, even though DR2 has already admitted and conf
 Every participant now uses DR2's occupied native client records as the authoritative growth signal and Steam's count as
 a fallback, ensuring command 3 is resent after the third or fourth record appears. Alpha 10 uses network protocol `4`.
 
+Alpha 11 adds a clear one-time startup confirmation containing the release and network protocol. Every tester should
+see it after launching DR2; if it does not appear, the mod did not load from that installation. This diagnostic-only
+release remains on network protocol `4` and is compatible with Alpha 10. Set `ShowStartupIndicator=0` in
+`four_player_coop.ini` to disable the confirmation after testing.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -77,4 +82,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.10`. Network protocol: `4`.
+Current release: `0.1.0-alpha.11`. Network protocol: `4`.

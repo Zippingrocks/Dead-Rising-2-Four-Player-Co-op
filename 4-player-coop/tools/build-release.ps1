@@ -13,6 +13,11 @@ $buildRoot = Join-Path $repoRoot "4-player-coop\builds"
 if (-not $OutputDir) { $OutputDir = Join-Path $buildRoot "releases" }
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $version = (Get-Content -LiteralPath (Join-Path $packageSource "VERSION") -Raw).Trim()
+$identityHeader = Get-Content -LiteralPath (Join-Path $repoRoot "4-player-coop\runtime\release_identity.h") -Raw
+$versionMatch = [regex]::Match($identityHeader, 'kVersion\[\]\s*=\s*"(?<value>[^"]+)"')
+if (-not $versionMatch.Success -or $versionMatch.Groups["value"].Value -ne $version) {
+    throw "Package VERSION and release_identity.h do not match"
+}
 $policyHeader = Get-Content -LiteralPath (Join-Path $repoRoot "4-player-coop\runtime\matchmaking_policy.h") -Raw
 $protocolMatch = [regex]::Match($policyHeader, 'kProtocolValue\[\]\s*=\s*"(?<value>[^"]+)"')
 if (-not $protocolMatch.Success) {

@@ -27,6 +27,7 @@
 #include "pause_acknowledgement.h"
 #include "harness_cursor.h"
 #include "matchmaking_policy.h"
+#include "release_identity.h"
 
 namespace coop_clothing {
 Owners g_owners;
@@ -53,6 +54,7 @@ bool g_trace = false;
 bool g_harness = false;
 bool g_production = false;
 bool g_baseGameDlcCompatibility = false;
+bool g_showStartupIndicator = false;
 void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
@@ -5651,6 +5653,20 @@ DWORD WINAPI PatchThread(LPVOID) {
   return 0;
 }
 
+DWORD WINAPI StartupIndicatorThread(LPVOID) {
+  Sleep(2500);
+  wchar_t message[384];
+  swprintf_s(message,
+      L"Four-Player Co-op is ACTIVE.\n\nRelease: %ls\nNetwork protocol: %S\n\n"
+      L"Every player should see this message and use the same release.",
+      coop_release::kVersionWide, coop_matchmaking::kProtocolValue);
+  Log("startup indicator: displayed release=%s protocol=%s", coop_release::kVersion,
+      coop_matchmaking::kProtocolValue);
+  MessageBoxW(nullptr, message, L"Dead Rising 2 Four-Player Co-op ACTIVE",
+      MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+  return 0;
+}
+
 int ArgumentInt(const wchar_t* commandLine, const wchar_t* prefix, int fallback) {
   const wchar_t* found = wcsstr(commandLine, prefix);
   return found ? _wtoi(found + wcslen(prefix)) : fallback;
@@ -5672,6 +5688,8 @@ void Initialize(const wchar_t* root) {
       GetPrivateProfileIntW(L"FourPlayerCoop", L"Enabled", 1, productionIni) != 0;
   g_baseGameDlcCompatibility = g_production &&
       GetPrivateProfileIntW(L"FourPlayerCoop", L"BaseGameDlcCompatibility", 1, productionIni) != 0;
+  g_showStartupIndicator = g_production &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"ShowStartupIndicator", 1, productionIni) != 0;
   g_silent = g_harness && wcsstr(commandLine, L"-coopsilent") != nullptr;
   g_isolatedDesktop = g_harness && wcsstr(commandLine, L"-coopdesktop") != nullptr;
   g_instance = ArgumentInt(commandLine, L"-coopinstance=", 0);
@@ -5785,6 +5803,10 @@ void Initialize(const wchar_t* root) {
   if (g_harness) StartLocalBus();
   PatchImports();
   if (g_production) {
+    if (g_showStartupIndicator) {
+      HANDLE indicator = CreateThread(nullptr, 0, StartupIndicatorThread, nullptr, 0, nullptr);
+      if (indicator) CloseHandle(indicator);
+    }
     HANDLE productionPatches = CreateThread(nullptr, 0, ProductionPatchThread, nullptr, 0, nullptr);
     if (productionPatches) CloseHandle(productionPatches);
   }

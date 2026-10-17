@@ -90,3 +90,6 @@ Each tester drags the ZIP's `Dead Rising 2` folder into Steam's `steamapps\commo
 merges it with the existing game folder, then uses the stock co-op menus. The exact protocol filter keeps this alpha
 pool separate from vanilla DR2 and incompatible mod builds, subject to the pending real-Steam validation. Removing the
 mod means deleting those two extra files. Steam verification repairs official files but normally leaves extra files.
+
+Alpha 11 shows a one-time **Four-Player Co-op ACTIVE** confirmation at startup with its release and protocol. All
+testers should see the same release before attempting to connect.
