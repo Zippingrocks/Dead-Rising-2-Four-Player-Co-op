@@ -678,6 +678,9 @@ lobbies.
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.
+Keep `tools/watch-production-dr2.ps1` running during live Steam tests. It targets only the exact G: DR2 executable,
+polls every 100 ms, recovers after 1.5 seconds of sustained window failure following startup grace, and records crash
+or hang evidence under `runs/production-guardian`. **Ctrl+Shift+F12** is the emergency DR2-only termination chord.
 Use `tools/test-four-instances.ps1` for hidden/muted tests, with `-CrashMonitor`; it guards available memory,
 closes only its own children, restores render settings, and records pre-cleanup exits and DLL hashes.
 Process survival alone is never a network pass. `network-summary.json` reports native handshake separately
