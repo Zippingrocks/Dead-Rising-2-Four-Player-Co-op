@@ -83,6 +83,12 @@ hard-gated behind an established Steam lobby in both callback and observer paths
 cannot schedule conversion. The confirmed-peer conversion remains active after lobby admission. Alpha 14 uses network
 protocol `6`; every participant must update and Alpha 13 is intentionally excluded.
 
+Alpha 15 fixes the real-Steam admission ordering failure observed immediately afterward. If a P2P session request
+arrives before Steam has propagated that peer's protocol metadata or rich presence, the host keeps the peer ID but
+still rejects the unproven request. After a later Steam callback exposes exact protocol proof, the host replays DR2's
+original `P2PSessionRequest` callback on the game thread. Vanilla and incompatible peers are never replayed or
+admitted. Alpha 15 uses network protocol `7`; every participant must update.
+
 ## Remove Or Reset
 
 Close the game and delete `dinput8.dll` and `four_player_coop.ini` from the Dead Rising 2 directory. Steam's Verify
@@ -98,4 +104,4 @@ files first if you want the mod completely gone.
   retained movement, camera, inventory, combat, damage, KO, and revive behavior. Those gameplay systems passed the
   local four-instance test; this group is validating them across real Steam PCs.
 
-Current release: `0.1.0-alpha.14`. Network protocol: `6`.
+Current release: `0.1.0-alpha.15`. Network protocol: `7`.

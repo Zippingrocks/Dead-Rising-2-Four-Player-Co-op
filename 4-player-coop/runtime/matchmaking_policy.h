@@ -6,7 +6,7 @@ namespace coop_matchmaking {
 
 // Increment this value whenever network-visible behavior becomes incompatible.
 constexpr char kProtocolKey[] = "dr2_4p_protocol";
-constexpr char kProtocolValue[] = "6";
+constexpr char kProtocolValue[] = "7";
 constexpr int kMemberLimit = 4;
 constexpr int kPublicLobbyType = 2;
 constexpr int kInvisibleLobbyType = 3;
@@ -33,6 +33,16 @@ inline bool IsMissing(const char* value) {
 inline bool HasPeerProof(const char* memberProtocol, const char* richPresenceProtocol) {
   if (!IsMissing(memberProtocol)) return IsCompatible(memberProtocol);
   return IsCompatible(richPresenceProtocol);
+}
+
+inline bool ShouldDeferPeer(const char* lobbyProtocol, const char* memberProtocol,
+                            const char* richPresenceProtocol) {
+  return IsCompatible(lobbyProtocol) && IsMissing(memberProtocol) && IsMissing(richPresenceProtocol);
+}
+
+inline bool ShouldReplayDeferredPeer(const char* lobbyProtocol, const char* memberProtocol,
+                                     const char* richPresenceProtocol) {
+  return IsCompatible(lobbyProtocol) && HasPeerProof(memberProtocol, richPresenceProtocol);
 }
 
 inline bool IsDr2OptionalSkillPack(unsigned int appId) {
@@ -84,6 +94,7 @@ inline bool IsRequiredProductionImport(const char* dll, const char* name) {
   if (!dll || !name || strcmp(dll, "steam_api.dll") != 0) return false;
   return strcmp(name, "SteamMatchmaking") == 0 || strcmp(name, "SteamFriends") == 0 ||
          strcmp(name, "SteamApps") == 0 ||
+         strcmp(name, "SteamAPI_RegisterCallback") == 0 ||
          strcmp(name, "SteamAPI_RunCallbacks") == 0;
 }
 

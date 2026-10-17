@@ -60,6 +60,7 @@ void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
 __declspec(align(8)) volatile LONG64 g_productionPendingPeer = 0;
+__declspec(align(8)) volatile LONG64 g_productionDeferredPeer = 0;
 volatile LONG g_productionFlowSignalMembers = 2;
 bool g_silent = false;
 bool g_isolatedDesktop = false;
@@ -428,6 +429,16 @@ bool __fastcall Hook_CanListen(void* query, void*, const unsigned long long* non
     }
     if (!coop_matchmaking::IsCompatible(lobbyProtocol) ||
         !coop_matchmaking::HasPeerProof(protocol, richPresenceProtocol)) {
+      const bool proofPending = peer && coop_matchmaking::ShouldDeferPeer(
+          lobbyProtocol, protocol, richPresenceProtocol);
+      if (proofPending) {
+        const LONG64 previous = InterlockedCompareExchange64(
+            &g_productionDeferredPeer, static_cast<LONG64>(*peer), 0);
+        if (previous == 0 || static_cast<unsigned long long>(previous) == *peer) {
+          Log("production admission: deferred peer=%08lX%08lX until protocol proof arrives",
+              static_cast<DWORD>(*peer >> 32), static_cast<DWORD>(*peer));
+        }
+      }
         static volatile LONG rejectedAttempts = 0;
         const LONG attempt = InterlockedIncrement(&rejectedAttempts);
         if (coop_matchmaking::ShouldLogAdmissionAttempt(attempt)) {
@@ -2580,6 +2591,7 @@ unsigned long long __fastcall Mod_Matchmaking_CreateLobby(Proxy* proxy, void*, i
   InterlockedExchange(&g_productionAcceptedClientCount, 0);
   InterlockedExchangePointer(&g_productionLocalServer, nullptr);
   InterlockedExchange64(&g_productionPendingPeer, 0);
+  InterlockedExchange64(&g_productionDeferredPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
   InterlockedExchange(&g_campaignActivationState, 0);
   InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&g_campaignActivationP2P), nullptr);
@@ -2601,6 +2613,7 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
   Log("production matchmaking: accepted compatible lobby=%08lX%08lX",
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby));
   InterlockedExchange64(&g_productionPendingPeer, 0);
+  InterlockedExchange64(&g_productionDeferredPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
   InterlockedExchange(&g_campaignActivationState, 0);
   InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&g_campaignActivationP2P), nullptr);
@@ -3390,7 +3403,7 @@ int g_numP2PSessionRequestCallbacks = 0;
 DWORD g_p2pSessionRequestMask = 0;
 void __cdecl Hook_RegisterCallback(void* callback, int id) {
   Log("SteamAPI_RegisterCallback(%p, id=%d)", callback, id);
-  if (g_harness && id == kP2PSessionRequestCallback && callback &&
+  if ((g_harness || g_production) && id == kP2PSessionRequestCallback && callback &&
       g_numP2PSessionRequestCallbacks < static_cast<int>(sizeof(g_p2pSessionRequestCallbacks) /
                                                          sizeof(g_p2pSessionRequestCallbacks[0]))) {
     g_p2pSessionRequestCallbacks[g_numP2PSessionRequestCallbacks++] = callback;
@@ -3464,6 +3477,45 @@ void DispatchP2PSessionRequest() {
       Log("callbacks: P2PSessionRequest object=%p fault=%08lX", callback, GetExceptionCode());
     }
     if (g_instance == 0) HarnessAcceptAdditionalPeer(source);
+  }
+}
+
+void DispatchProductionDeferredP2PSessionRequest() {
+  if (!g_production || g_numP2PSessionRequestCallbacks <= 0) return;
+  const unsigned long long peer = static_cast<unsigned long long>(
+      InterlockedCompareExchange64(&g_productionDeferredPeer, 0, 0));
+  const unsigned long long lobby = static_cast<unsigned long long>(
+      InterlockedCompareExchange64(&g_productionLobby, 0, 0));
+  void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
+  void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+  if (!peer || !lobby || !matchmaking || !friends) return;
+
+  void** matchmakingMethods = *reinterpret_cast<void***>(matchmaking);
+  using GetMemberData_t = const char*(__thiscall*)(void*, unsigned long long, unsigned long long, const char*);
+  using GetLobbyData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+  const char* memberProtocol = reinterpret_cast<GetMemberData_t>(matchmakingMethods[24])(
+      matchmaking, lobby, peer, coop_matchmaking::kProtocolKey);
+  const char* lobbyProtocol = reinterpret_cast<GetLobbyData_t>(matchmakingMethods[19])(
+      matchmaking, lobby, coop_matchmaking::kProtocolKey);
+  void** friendsMethods = *reinterpret_cast<void***>(friends);
+  using GetPresence_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+  const char* presenceProtocol = reinterpret_cast<GetPresence_t>(
+      friendsMethods[coop_matchmaking::kFriendsGetFriendRichPresenceSlot])(
+      friends, peer, coop_matchmaking::kProtocolKey);
+  if (!coop_matchmaking::ShouldReplayDeferredPeer(
+          lobbyProtocol, memberProtocol, presenceProtocol)) return;
+  if (InterlockedCompareExchange64(&g_productionDeferredPeer, 0, static_cast<LONG64>(peer)) !=
+      static_cast<LONG64>(peer)) return;
+
+  struct P2PSessionRequest { unsigned long long remote; } request = {peer};
+  Log("production admission: replaying deferred P2PSessionRequest peer=%08lX%08lX memberProtocol='%s' "
+      "presenceProtocol='%s'",
+      static_cast<DWORD>(peer >> 32), static_cast<DWORD>(peer),
+      memberProtocol ? memberProtocol : "<null>", presenceProtocol ? presenceProtocol : "<null>");
+  __try {
+    coop_steam::RunCallback(g_p2pSessionRequestCallbacks[0], &request);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("production admission: deferred P2PSessionRequest fault=%08lX", GetExceptionCode());
   }
 }
 
@@ -3571,6 +3623,7 @@ void __cdecl Hook_RunCallbacksImpl() {
   // evidence needed to synthesize P2PSessionRequest_t.
   if (g_harness) DispatchP2PSessionRequest();
   if (Real_RunCallbacks) Real_RunCallbacks();
+  if (g_production) DispatchProductionDeferredP2PSessionRequest();
   if (g_production) {
     static volatile LONG presencePublished = 0;
     void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);

@@ -663,6 +663,10 @@ mutually confirmed, invoking it only from the Steam callback/game thread with th
 Alpha 14/protocol 6 additionally requires an established Steam lobby before either production callback or observer
 path may inspect and schedule that conversion, fixing Player 2's Alpha 13 pre-title launch regression while retaining
 the confirmed-peer transition.
+The next Alpha 14 live attempt proved both peers had a green runtime indicator, but the host received Player 2's P2P
+request before Steam exposed member metadata, rich presence, or lobby membership and rejected the only request.
+Alpha 15/protocol 7 retains that strict rejection, remembers the unproven peer, and replays DR2's registered
+`P2PSessionRequest` callback only after a later Steam callback exposes exact matching protocol proof.
 
 ## Operating Rules
 
