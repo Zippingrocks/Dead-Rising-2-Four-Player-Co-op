@@ -697,6 +697,26 @@ breakpoint and single-step statuses without dumping them, matching its handling 
 All 178 Python tests, 56 subtests, and the monitor Release build pass. Repeat Alpha 18 unchanged under the corrected
 watcher before changing matchmaking behavior again.
 
+### Background join research checkpoint (2026-10-17)
+
+A disabled-by-default production test path can now enumerate exact protocol-7 lobbies without opening DR2's lobby
+browser or taking foreground focus. In the live control it repeatedly found lobby `0186000015E9CB2C`, recovered the
+otherwise uncached owner from DR2's `hostSteamID`/`HostId` lobby metadata, and resolved owner Steam ID
+`76561199441715350` to persona `lacey`. This proves unattended discovery and target identification.
+
+Delivering DR2's registered `GameLobbyJoinRequested` callback from the title frontend did not cause DR2 to call
+`JoinLobby`. The user's contemporaneous failed join likewise produced no `JoinLobby`, P2P request, or admission
+trace, so that attempt failed before the network fixes were exercised. The first ad hoc private-input runner also
+failed before sending input because it used PowerShell's reserved `$input` variable; it must not be counted as an
+automated frontend or matchmaking result.
+
+`tools/run-production-auto-join.ps1` replaces that one-off runner. It requires an exact owned DR2 process and an
+explicit local `BackgroundAutoJoin=1`, drives the previously proven frontend sequence through the mod-private
+`four_player_auto_input.txt` DirectInput path, never activates a window or sends global input, cleans up in `finally`,
+and only passes after the runtime records `production matchmaking: accepted lobby=`. The public package leaves this
+test path disabled. The G: install was restored after testing to the public Alpha 18 DLL
+`398173368661E2D490D0EB2BCAB096AD13381D3AB58C50FDFFD565656BFF6837` and its normal three-key INI.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.

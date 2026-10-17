@@ -31,6 +31,7 @@
 namespace coop {
 void Initialize(const wchar_t* root);
 bool IsHarness();
+bool BackgroundAutoJoinEnabled();
 bool StatusIndicatorEnabled();
 int ProductionStatus();
 bool CampaignActivationPending();
@@ -1644,8 +1645,9 @@ DWORD WINAPI CampaignThread(LPVOID) {
   return 0;
 }
 
-// ---- Scripted keyboard input for unattended tests. Case Zero uses case_zero_input.txt; the four-player harness uses
-// coop_input.N.txt per process. Each file lists held DIK scan codes (decimal, whitespace-separated, e.g. 28 for Enter).
+// ---- Scripted keyboard input for unattended tests. Case Zero uses case_zero_input.txt, background production join
+// tests use four_player_auto_input.txt, and the four-player harness uses coop_input.N.txt per process. Each file lists
+// held DIK scan codes (decimal, whitespace-separated, e.g. 28 for Enter).
 const GUID kGuidSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
 const GUID kGuidSysMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
 using CreateDevice8_t = HRESULT(__stdcall*)(void*, REFGUID, void**, void*);
@@ -1692,6 +1694,7 @@ void PollScriptKeys(bool background = false) {
   memset(g_scriptKeys, 0, sizeof(g_scriptKeys));
   wchar_t path[MAX_PATH];
   if (coop::IsHarness()) swprintf(path, MAX_PATH, L"%scoop_input.%d.txt", g_root, coop::Instance());
+  else if (coop::BackgroundAutoJoinEnabled()) swprintf(path, MAX_PATH, L"%sfour_player_auto_input.txt", g_root);
   else swprintf(path, MAX_PATH, L"%scase_zero_input.txt", g_root);
   FILE* file = _wfsopen(path, L"r", _SH_DENYNO);
   if (file) {
@@ -1751,7 +1754,8 @@ HRESULT __stdcall Hook_GetDeviceState(void* device, DWORD size, void* data) {
     BYTE* keys = static_cast<BYTE*>(data);
     for (int index = 0; index < 256; index++) {
       keys[index] |= g_scriptKeys[index];
-      if (coop::IsHarness() && g_scriptKeys[index] != g_stateLoggedKeys[index]) {
+      if ((coop::IsHarness() || coop::BackgroundAutoJoinEnabled()) &&
+          g_scriptKeys[index] != g_stateLoggedKeys[index]) {
         coop::TraceInput(index, g_scriptKeys[index] != 0);
         g_stateLoggedKeys[index] = g_scriptKeys[index];
         g_reportedKeys[index] = g_scriptKeys[index];
@@ -1780,7 +1784,8 @@ HRESULT __stdcall Hook_GetDeviceData(void* device, DWORD objectSize, void* data,
     if (g_scriptKeys[key] == g_reportedKeys[key]) continue;
     DeviceObjectData& event = events[(*count)++];
     event = {static_cast<DWORD>(key), g_scriptKeys[key], GetTickCount(), 0, 0};
-    if (coop::IsHarness()) coop::TraceInput(key, g_scriptKeys[key] != 0);
+    if (coop::IsHarness() || coop::BackgroundAutoJoinEnabled())
+      coop::TraceInput(key, g_scriptKeys[key] != 0);
     g_reportedKeys[key] = g_scriptKeys[key];
     g_stateLoggedKeys[key] = g_scriptKeys[key];
   }
@@ -1861,7 +1866,8 @@ extern "C" HRESULT WINAPI CZ_DirectInput8Create(HINSTANCE instance, DWORD versio
     if (!real) return E_FAIL;
   }
   const HRESULT result = real(instance, version, riid, out, outer);
-  if (SUCCEEDED(result) && out && *out && (g_campaign == Campaign::CaseZero || coop::IsHarness()))
+  if (SUCCEEDED(result) && out && *out &&
+      (g_campaign == Campaign::CaseZero || coop::IsHarness() || coop::BackgroundAutoJoinEnabled()))
     PatchVtableSlot(*out, 3, reinterpret_cast<void*>(&Hook_CreateDevice8), reinterpret_cast<void**>(&Real_CreateDevice8));
   return result;
 }
@@ -1897,6 +1903,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
       else g_harnessCaptureRoot[0] = 0;
     }
     Log(1, "local save storage: configured=%d root=%ls; Steam save I/O disabled for harness", configured, saveRoot);
+    HANDLE inputThread = CreateThread(nullptr, 0, ScriptInputThread, nullptr, 0, nullptr);
+    if (inputThread) CloseHandle(inputThread);
+  }
+  if (coop::BackgroundAutoJoinEnabled()) {
     HANDLE inputThread = CreateThread(nullptr, 0, ScriptInputThread, nullptr, 0, nullptr);
     if (inputThread) CloseHandle(inputThread);
   }

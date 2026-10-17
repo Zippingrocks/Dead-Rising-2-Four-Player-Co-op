@@ -55,9 +55,14 @@ bool g_harness = false;
 bool g_production = false;
 bool g_baseGameDlcCompatibility = false;
 bool g_showStatusIndicator = false;
+bool g_backgroundAutoJoin = false;
+bool g_autoJoinSingleCompatibleFallback = false;
+char g_autoJoinPersona[64] = {};
+DWORD g_autoJoinPollMilliseconds = 5000;
 volatile LONG g_productionPatchFailed = 0;
 void* volatile g_productionMatchmaking = nullptr;
 void* volatile g_productionFriends = nullptr;
+void* volatile g_productionUtils = nullptr;
 __declspec(align(8)) volatile LONG64 g_productionLobby = 0;
 __declspec(align(8)) volatile LONG64 g_productionPendingPeer = 0;
 __declspec(align(8)) volatile LONG64 g_productionDeferredPeer = 0;
@@ -3420,6 +3425,7 @@ void* Wrap(void* real, int iface) {
   if (!real) return real;
   if (g_production && iface == kMatchmaking) InterlockedExchangePointer(&g_productionMatchmaking, real);
   if (g_production && iface == kFriends) InterlockedExchangePointer(&g_productionFriends, real);
+  if (g_production && iface == kUtils) InterlockedExchangePointer(&g_productionUtils, real);
   if (!g_trace && !g_harness &&
       !(g_production && (iface == kMatchmaking || (iface == kApps && g_baseGameDlcCompatibility)))) return real;
   EnterCriticalSection(&g_lock);
@@ -3458,9 +3464,15 @@ RegisterCallResult_t Real_RegisterCallResult = nullptr;
 UnregisterCallResult_t Real_UnregisterCallResult = nullptr;
 RunCallbacks_t Real_RunCallbacks = nullptr;
 constexpr int kP2PSessionRequestCallback = 1202;
+constexpr int kGameLobbyJoinRequestedCallback = 333;
+constexpr int kLobbyMatchListCallback = 510;
 void* g_p2pSessionRequestCallbacks[8] = {};
 int g_numP2PSessionRequestCallbacks = 0;
 DWORD g_p2pSessionRequestMask = 0;
+void* g_gameLobbyJoinRequestedCallbacks[4] = {};
+int g_numGameLobbyJoinRequestedCallbacks = 0;
+unsigned long long g_backgroundLobbyListCall = 0;
+DWORD g_backgroundAutoJoinNextPoll = 0;
 void __cdecl Hook_RegisterCallback(void* callback, int id) {
   Log("SteamAPI_RegisterCallback(%p, id=%d)", callback, id);
   if ((g_harness || g_production) && id == kP2PSessionRequestCallback && callback &&
@@ -3471,6 +3483,12 @@ void __cdecl Hook_RegisterCallback(void* callback, int id) {
     Log("callbacks: captured P2PSessionRequest object=%p count=%d vtable=%p slots=%p,%p,%p",
         callback, g_numP2PSessionRequestCallbacks, vtable,
         vtable ? vtable[0] : nullptr, vtable ? vtable[1] : nullptr, vtable ? vtable[2] : nullptr);
+  }
+  if (g_production && id == kGameLobbyJoinRequestedCallback && callback &&
+      g_numGameLobbyJoinRequestedCallbacks < _countof(g_gameLobbyJoinRequestedCallbacks)) {
+    g_gameLobbyJoinRequestedCallbacks[g_numGameLobbyJoinRequestedCallbacks++] = callback;
+    Log("callbacks: captured GameLobbyJoinRequested object=%p count=%d", callback,
+        g_numGameLobbyJoinRequestedCallbacks);
   }
   Real_RegisterCallback(callback, id);
 }
@@ -3579,6 +3597,145 @@ void DispatchProductionDeferredP2PSessionRequest() {
   }
 }
 
+void TickProductionBackgroundAutoJoin() {
+  if (!g_production || !g_backgroundAutoJoin || !g_autoJoinPersona[0] ||
+      g_numGameLobbyJoinRequestedCallbacks <= 0 ||
+      InterlockedCompareExchange64(&g_productionLobby, 0, 0)) return;
+
+  void* matchmaking = InterlockedCompareExchangePointer(&g_productionMatchmaking, nullptr, nullptr);
+  void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
+  void* utils = InterlockedCompareExchangePointer(&g_productionUtils, nullptr, nullptr);
+  if (!utils && Real_Accessor[kUtils]) {
+    utils = Real_Accessor[kUtils]();
+    if (utils) InterlockedExchangePointer(&g_productionUtils, utils);
+  }
+  if (!utils) {
+    HMODULE steamApi = GetModuleHandleW(L"steam_api.dll");
+    using SteamUtilsAccessor_t = void*(__cdecl*)();
+    auto accessor = steamApi ? reinterpret_cast<SteamUtilsAccessor_t>(
+        GetProcAddress(steamApi, "SteamUtils")) : nullptr;
+    utils = accessor ? accessor() : nullptr;
+    if (utils) {
+      InterlockedExchangePointer(&g_productionUtils, utils);
+      Log("background auto-join: acquired SteamUtils through steam_api export");
+    }
+  }
+  if (!matchmaking || !friends || !utils) return;
+
+  const DWORD now = GetTickCount();
+  void** matchmakingMethods = *reinterpret_cast<void***>(matchmaking);
+  if (!g_backgroundLobbyListCall) {
+    if (g_backgroundAutoJoinNextPoll &&
+        static_cast<LONG>(now - g_backgroundAutoJoinNextPoll) < 0) return;
+    using AddStringFilter_t = void(__thiscall*)(void*, const char*, const char*, int);
+    using AddResultCountFilter_t = void(__thiscall*)(void*, int);
+    using RequestLobbyList_t = unsigned long long(__thiscall*)(void*);
+    reinterpret_cast<AddStringFilter_t>(matchmakingMethods[5])(
+        matchmaking, coop_matchmaking::kProtocolKey, coop_matchmaking::kProtocolValue, 0);
+    reinterpret_cast<AddResultCountFilter_t>(matchmakingMethods[10])(matchmaking, 50);
+    g_backgroundLobbyListCall =
+        reinterpret_cast<RequestLobbyList_t>(matchmakingMethods[4])(matchmaking);
+    g_backgroundAutoJoinNextPoll = now + g_autoJoinPollMilliseconds;
+    Log("background auto-join: requested protocol-%s lobby list call=%llX target='%s'",
+        coop_matchmaking::kProtocolValue, g_backgroundLobbyListCall, g_autoJoinPersona);
+    return;
+  }
+
+  void** utilsMethods = *reinterpret_cast<void***>(utils);
+  using IsCallCompleted_t = bool(__thiscall*)(void*, unsigned long long, bool*);
+  bool completionFailed = false;
+  if (!reinterpret_cast<IsCallCompleted_t>(utilsMethods[11])(
+          utils, g_backgroundLobbyListCall, &completionFailed)) return;
+
+  LobbyMatchListResult result = {};
+  bool resultFailed = completionFailed;
+  using GetCallResult_t = bool(__thiscall*)(void*, unsigned long long, void*, int, int, bool*);
+  const unsigned long long completedCall = g_backgroundLobbyListCall;
+  g_backgroundLobbyListCall = 0;
+  const bool received = reinterpret_cast<GetCallResult_t>(utilsMethods[13])(
+      utils, completedCall, &result, sizeof(result), kLobbyMatchListCallback, &resultFailed);
+  if (!received || resultFailed) {
+    Log("background auto-join: lobby list failed call=%llX received=%d ioFailure=%d",
+        completedCall, received, resultFailed);
+    return;
+  }
+
+  using GetLobbyByIndex_t = void*(__thiscall*)(void*, unsigned long long*, int);
+  using GetLobbyOwner_t = void*(__thiscall*)(void*, unsigned long long*, unsigned long long);
+  using GetLobbyData_t = const char*(__thiscall*)(void*, unsigned long long, const char*);
+  using GetFriendPersonaName_t = const char*(__thiscall*)(void*, unsigned long long);
+  void** friendsMethods = *reinterpret_cast<void***>(friends);
+  unsigned long long selectedLobby = 0;
+  unsigned long long selectedOwner = 0;
+  unsigned long long firstCompatibleLobby = 0;
+  unsigned long long firstCompatibleOwner = 0;
+  DWORD compatibleCount = 0;
+  for (DWORD index = 0; index < result.count; index++) {
+    unsigned long long lobby = 0;
+    reinterpret_cast<GetLobbyByIndex_t>(matchmakingMethods[12])(matchmaking, &lobby, index);
+    if (!lobby) continue;
+    const char* protocol = reinterpret_cast<GetLobbyData_t>(matchmakingMethods[19])(
+        matchmaking, lobby, coop_matchmaking::kProtocolKey);
+    if (!coop_matchmaking::IsCompatible(protocol)) continue;
+    compatibleCount++;
+    unsigned long long owner = 0;
+    reinterpret_cast<GetLobbyOwner_t>(matchmakingMethods[35])(matchmaking, &owner, lobby);
+    const char* hostSteamId = reinterpret_cast<GetLobbyData_t>(matchmakingMethods[19])(
+        matchmaking, lobby, "hostSteamID");
+    const char* hostId = reinterpret_cast<GetLobbyData_t>(matchmakingMethods[19])(
+        matchmaking, lobby, "HostId");
+    if (!owner && hostSteamId && hostSteamId[0]) owner = _strtoui64(hostSteamId, nullptr, 10);
+    if (!owner && hostId && hostId[0]) owner = _strtoui64(hostId, nullptr, 16);
+    if (!firstCompatibleLobby) {
+      firstCompatibleLobby = lobby;
+      firstCompatibleOwner = owner;
+    }
+    const char* persona = owner ? reinterpret_cast<GetFriendPersonaName_t>(friendsMethods[7])(
+        friends, owner) : nullptr;
+    Log("background auto-join: candidate index=%lu lobby=%08lX%08lX owner=%08lX%08lX persona='%s' "
+        "hostSteamID='%s' HostId='%s'",
+        index, static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby),
+        static_cast<DWORD>(owner >> 32), static_cast<DWORD>(owner),
+        persona ? persona : "<null>", hostSteamId ? hostSteamId : "<null>",
+        hostId ? hostId : "<null>");
+    if (persona && _stricmp(persona, g_autoJoinPersona) == 0) {
+      selectedLobby = lobby;
+      selectedOwner = owner;
+      break;
+    }
+  }
+  if (!selectedLobby && g_autoJoinSingleCompatibleFallback && compatibleCount == 1) {
+    selectedLobby = firstCompatibleLobby;
+    selectedOwner = firstCompatibleOwner;
+    Log("background auto-join: using single protocol-compatible fallback lobby=%08lX%08lX "
+        "because owner persona is not cached",
+        static_cast<DWORD>(selectedLobby >> 32), static_cast<DWORD>(selectedLobby));
+  }
+  if (!selectedLobby) {
+    Log("background auto-join: target='%s' not present among %lu protocol-compatible result(s)",
+        g_autoJoinPersona, compatibleCount);
+    return;
+  }
+
+  struct GameLobbyJoinRequested {
+    unsigned long long lobby;
+    unsigned long long friendId;
+  } request = {selectedLobby, selectedOwner};
+  InterlockedExchange64(&g_productionFilteredLobby, static_cast<LONG64>(selectedLobby));
+  InterlockedExchange(&g_productionFilteredDiscovery, 1);
+  g_backgroundAutoJoinNextPoll = now + 15000;
+  Log("background auto-join: dispatching native join request lobby=%08lX%08lX owner=%08lX%08lX "
+      "persona='%s' callback=%p",
+      static_cast<DWORD>(selectedLobby >> 32), static_cast<DWORD>(selectedLobby),
+      static_cast<DWORD>(selectedOwner >> 32), static_cast<DWORD>(selectedOwner),
+      g_autoJoinPersona, g_gameLobbyJoinRequestedCallbacks[0]);
+  __try {
+    coop_steam::RunCallback(g_gameLobbyJoinRequestedCallbacks[0], &request);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Log("background auto-join: native join callback fault=%08lX", GetExceptionCode());
+  }
+}
+
 LONG ProductionNativeMemberCount() {
   void* server = InterlockedCompareExchangePointer(&g_clientDataServer, nullptr, nullptr);
   LONG allocated = InterlockedCompareExchange(&g_clientDataCount, 0, 0);
@@ -3684,6 +3841,7 @@ void __cdecl Hook_RunCallbacksImpl() {
   if (g_harness) DispatchP2PSessionRequest();
   if (Real_RunCallbacks) Real_RunCallbacks();
   if (g_production) DispatchProductionDeferredP2PSessionRequest();
+  if (g_production) TickProductionBackgroundAutoJoin();
   if (g_production) {
     static volatile LONG presencePublished = 0;
     void* friends = InterlockedCompareExchangePointer(&g_productionFriends, nullptr, nullptr);
@@ -5839,6 +5997,22 @@ void Initialize(const wchar_t* root) {
       GetPrivateProfileIntW(L"FourPlayerCoop", L"BaseGameDlcCompatibility", 1, productionIni) != 0;
   g_showStatusIndicator = g_production &&
       GetPrivateProfileIntW(L"FourPlayerCoop", L"ShowStatusIndicator", 1, productionIni) != 0;
+  g_backgroundAutoJoin = g_production &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"BackgroundAutoJoin", 0, productionIni) != 0;
+  g_autoJoinSingleCompatibleFallback = g_backgroundAutoJoin &&
+      GetPrivateProfileIntW(L"FourPlayerCoop", L"AutoJoinSingleCompatibleFallback", 0,
+                            productionIni) != 0;
+  if (g_backgroundAutoJoin) {
+    wchar_t persona[64] = {};
+    GetPrivateProfileStringW(L"FourPlayerCoop", L"AutoJoinPersona", L"", persona,
+                             _countof(persona), productionIni);
+    WideCharToMultiByte(CP_UTF8, 0, persona, -1, g_autoJoinPersona,
+                        static_cast<int>(sizeof(g_autoJoinPersona)), nullptr, nullptr);
+    int pollSeconds = GetPrivateProfileIntW(L"FourPlayerCoop", L"AutoJoinPollSeconds", 5, productionIni);
+    if (pollSeconds < 2) pollSeconds = 2;
+    if (pollSeconds > 60) pollSeconds = 60;
+    g_autoJoinPollMilliseconds = static_cast<DWORD>(pollSeconds) * 1000;
+  }
   g_silent = g_harness && wcsstr(commandLine, L"-coopsilent") != nullptr;
   g_isolatedDesktop = g_harness && wcsstr(commandLine, L"-coopdesktop") != nullptr;
   g_instance = ArgumentInt(commandLine, L"-coopinstance=", 0);
@@ -5951,6 +6125,9 @@ void Initialize(const wchar_t* root) {
       "instance=%d requestedPlayers=%d pid=%lu",
       coop_release::kVersion, coop_matchmaking::kProtocolValue, g_trace, g_harness, g_production, g_silent,
       g_instance, g_requestedPlayers, GetCurrentProcessId());
+  if (g_backgroundAutoJoin)
+    Log("background auto-join: enabled target='%s' pollMilliseconds=%lu",
+        g_autoJoinPersona[0] ? g_autoJoinPersona : "<missing>", g_autoJoinPollMilliseconds);
   if (g_directP2PProbe) Log("direct transport: stockLayout=%d", g_stockTransport);
   if (g_harness) StartLocalBus();
   PatchImports();
@@ -5982,6 +6159,7 @@ void Initialize(const wchar_t* root) {
 }
 
 bool IsHarness() { return g_harness; }
+bool BackgroundAutoJoinEnabled() { return g_backgroundAutoJoin; }
 bool StatusIndicatorEnabled() { return g_showStatusIndicator; }
 int ProductionStatus() {
   if (!g_showStatusIndicator || !g_production) return 0;

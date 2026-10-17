@@ -4,6 +4,7 @@ void Initialize(const wchar_t*) {}
 bool StatusIndicatorEnabled() { return false; }
 int ProductionStatus() { return 0; }
 bool IsHarness() { return false; }
+bool BackgroundAutoJoinEnabled() { return false; }
 bool CampaignActivationPending() { return false; }
 void ActivateCampaignActorsOnCurrentThread() {}
 bool ClientTransitionPending() { return false; }
