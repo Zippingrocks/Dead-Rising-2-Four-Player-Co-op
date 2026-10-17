@@ -681,12 +681,21 @@ through `GetLobbyByIndex`, Alpha 16 rejected it before host traffic. Alpha 17 re
 that path through the lobby owner's exact protocol-7 rich presence, requesting delayed presence and requiring a
 subsequent retry instead of admitting an unproven lobby.
 
+The Alpha 17 live control at `16:17:36` and retry at `16:18:50` reached direct lobby
+`0186000015D18B6B`, but Steam returned empty lobby protocol metadata, no filtered-candidate proof, and owner ID zero.
+That proves owner rich presence cannot authenticate every direct invite before joining. Alpha 18 keeps protocol 7,
+requests lobby data, and lets a metadata-empty direct join begin provisionally. The existing P2P admission boundary
+still requires exact lobby and peer protocol proof before any gameplay connection is accepted, while explicit
+protocol mismatches continue to fail closed.
+
 ## Operating Rules
 
 Work only in the D: DR2-Porting-Workspace. Keep DR1 and other agents' projects separate.
 Keep `tools/watch-production-dr2.ps1` running during live Steam tests. It targets only the exact G: DR2 executable,
 polls every 100 ms, recovers after 1.5 seconds of sustained window failure following startup grace, and records crash
 or hang evidence under `runs/production-guardian`. **Ctrl+Shift+F12** is the emergency DR2-only termination chord.
+The crash debugger attaches only after startup grace and a real DR2 window exists; immediate attachment was proven to
+interfere with Steam's bootstrap handoff during the October 17 Alpha 17 launch test.
 Use `tools/test-four-instances.ps1` for hidden/muted tests, with `-CrashMonitor`; it guards available memory,
 closes only its own children, restores render settings, and records pre-cleanup exits and DLL hashes.
 Process survival alone is never a network pass. `network-summary.json` reports native handshake separately

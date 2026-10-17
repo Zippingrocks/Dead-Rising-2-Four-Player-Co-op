@@ -115,14 +115,7 @@ while ($true) {
     Write-GuardianEvent 'target-acquired' @{ pid=$target.Id; start_ticks=$startTicks; run_dir=$runDir }
 
     $crashMonitor = $null
-    if (Test-Path -LiteralPath $monitor) {
-        $arguments = @('--pid', $target.Id, '--out-dir', (Quote-NativeArgument $runDir), '--first-chance',
-            '0xc0000409,0xc0000005,0xe06d7363', '--max-dumps', '6')
-        $crashMonitor = Start-Process -FilePath $monitor -ArgumentList $arguments -WindowStyle Hidden -PassThru
-        Write-GuardianEvent 'crash-monitor-started' @{ pid=$target.Id; monitor_pid=$crashMonitor.Id }
-    } else {
-        Write-GuardianEvent 'crash-monitor-missing' @{ pid=$target.Id; path=$monitor }
-    }
+    $crashMonitorMissingLogged = $false
 
     while (Test-Identity $target $startTicks) {
         if ([Dr2Guardian.Native]::EmergencyChordDown()) {
@@ -133,6 +126,21 @@ while ($true) {
         }
 
         $target.Refresh()
+        if ($null -eq $crashMonitor -and
+                $observedAt.ElapsedMilliseconds -ge $StartupGraceMilliseconds -and
+                $target.MainWindowHandle -ne 0) {
+            if (Test-Path -LiteralPath $monitor) {
+                $arguments = @('--pid', $target.Id, '--out-dir', (Quote-NativeArgument $runDir), '--first-chance',
+                    '0xc0000409,0xc0000005,0xe06d7363', '--max-dumps', '6')
+                $crashMonitor = Start-Process -FilePath $monitor -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                Write-GuardianEvent 'crash-monitor-started' @{
+                    pid=$target.Id; monitor_pid=$crashMonitor.Id; delayed_until_window=$true
+                }
+            } elseif (-not $crashMonitorMissingLogged) {
+                Write-GuardianEvent 'crash-monitor-missing' @{ pid=$target.Id; path=$monitor }
+                $crashMonitorMissingLogged = $true
+            }
+        }
         $windowResponsive = [Dr2Guardian.Native]::WindowResponds($target.MainWindowHandle, 100)
         $responsive = $target.Responding -and $windowResponsive
         if ($observedAt.ElapsedMilliseconds -lt $StartupGraceMilliseconds) { $responsive = $true }

@@ -32,6 +32,9 @@ class ProductionDr2GuardianContractTests(unittest.TestCase):
     def test_crash_monitor_is_scoped_to_observed_pid(self):
         self.assertIn("@('--pid', $target.Id, '--out-dir', (Quote-NativeArgument $runDir)", self.source)
         self.assertIn("'--max-dumps', '6'", self.source)
+        self.assertIn("$observedAt.ElapsedMilliseconds -ge $StartupGraceMilliseconds", self.source)
+        self.assertIn("$target.MainWindowHandle -ne 0", self.source)
+        self.assertIn("delayed_until_window=$true", self.source)
 
 
 if __name__ == "__main__":

@@ -111,4 +111,10 @@ Alpha 17 also authenticates direct Steam/invite joins through the lobby owner's 
 has not populated lobby metadata yet. Missing owner presence is requested and the attempt remains rejected until
 proof arrives; explicit protocol mismatches still fail closed.
 
-Current release: `0.1.0-alpha.17`. Network protocol: `7`.
+Alpha 18 fixes the remaining direct-invite cache race observed against Lacey's lobby. Steam supplied neither lobby
+metadata nor an owner ID before `JoinLobby`, leaving Alpha 17 without a pre-join identity to authenticate. Alpha 18
+requests the missing lobby data and permits that metadata-empty direct join to begin provisionally. Gameplay traffic
+remains gated by the existing protocol-7 lobby and peer checks, and any explicit mismatch is still rejected. Alpha 18
+remains wire-compatible with Alpha 15-17 hosts on network protocol `7`.
+
+Current release: `0.1.0-alpha.18`. Network protocol: `7`.

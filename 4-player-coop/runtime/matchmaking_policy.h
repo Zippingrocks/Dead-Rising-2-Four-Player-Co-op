@@ -37,6 +37,13 @@ inline bool ShouldJoinLobby(const char* lobbyProtocol, bool exactFilteredCandida
        (exactFilteredCandidate || IsCompatible(ownerPresenceProtocol)));
 }
 
+inline bool ShouldProvisionallyJoinLobby(unsigned long long lobby, const char* lobbyProtocol,
+                                         bool exactFilteredCandidate,
+                                         const char* ownerPresenceProtocol) {
+  return lobby != 0 && IsMissing(lobbyProtocol) && !exactFilteredCandidate &&
+      IsMissing(ownerPresenceProtocol);
+}
+
 inline bool HasPeerProof(const char* memberProtocol, const char* richPresenceProtocol) {
   if (!IsMissing(memberProtocol)) return IsCompatible(memberProtocol);
   return IsCompatible(richPresenceProtocol);

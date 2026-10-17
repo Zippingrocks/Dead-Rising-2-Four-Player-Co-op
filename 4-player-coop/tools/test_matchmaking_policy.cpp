@@ -40,6 +40,14 @@ int main() {
   assert(!coop_matchmaking::ShouldJoinLobby("", false, ""));
   assert(!coop_matchmaking::ShouldJoinLobby("6", true, "7"));
   assert(!coop_matchmaking::ShouldJoinLobby(nullptr, false, "6"));
+  assert(coop_matchmaking::ShouldProvisionallyJoinLobby(1, nullptr, false, nullptr));
+  assert(coop_matchmaking::ShouldProvisionallyJoinLobby(1, "", false, ""));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(0, nullptr, false, nullptr));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(1, "7", false, nullptr));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(1, "6", false, nullptr));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(1, nullptr, true, nullptr));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(1, nullptr, false, "7"));
+  assert(!coop_matchmaking::ShouldProvisionallyJoinLobby(1, nullptr, false, "6"));
   assert(coop_matchmaking::HasPeerProof("7", nullptr));
   assert(coop_matchmaking::HasPeerProof(nullptr, "7"));
   assert(coop_matchmaking::HasPeerProof("", "7"));

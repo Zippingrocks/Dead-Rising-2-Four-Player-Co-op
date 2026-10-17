@@ -2648,7 +2648,18 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
       }
     }
   }
-  if (!coop_matchmaking::ShouldJoinLobby(protocol, filteredCandidate, ownerPresenceProtocol)) {
+  const bool provisional = coop_matchmaking::ShouldProvisionallyJoinLobby(
+      lobby, protocol, filteredCandidate, ownerPresenceProtocol);
+  bool requestedLobbyData = false;
+  if (provisional) {
+    using RequestLobbyData_t = bool(__thiscall*)(void*, unsigned long long);
+    requestedLobbyData = RealMethod<RequestLobbyData_t>(proxy, 28)(proxy->real, lobby);
+    Log("production matchmaking: provisional direct join lobby=%08lX%08lX; requested lobby data=%d; "
+        "P2P admission remains protocol-gated",
+        static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), requestedLobbyData);
+  }
+  if (!coop_matchmaking::ShouldJoinLobby(protocol, filteredCandidate, ownerPresenceProtocol) &&
+      !provisional) {
     Log("production matchmaking: rejected incompatible lobby=%08lX%08lX protocol='%s' "
         "filteredCandidate=%d owner=%08lX%08lX ownerPresence='%s'",
         static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>",
@@ -2657,10 +2668,10 @@ unsigned long long __fastcall Mod_Matchmaking_JoinLobby(Proxy* proxy, void*, uns
     return 0;
   }
   Log("production matchmaking: accepted lobby=%08lX%08lX protocol='%s' filteredCandidate=%d "
-      "owner=%08lX%08lX ownerPresence='%s'",
+      "owner=%08lX%08lX ownerPresence='%s' provisional=%d requestedLobbyData=%d",
       static_cast<DWORD>(lobby >> 32), static_cast<DWORD>(lobby), protocol ? protocol : "<null>",
       filteredCandidate, static_cast<DWORD>(owner >> 32), static_cast<DWORD>(owner),
-      ownerPresenceProtocol ? ownerPresenceProtocol : "<null>");
+      ownerPresenceProtocol ? ownerPresenceProtocol : "<null>", provisional, requestedLobbyData);
   InterlockedExchange64(&g_productionPendingPeer, 0);
   InterlockedExchange64(&g_productionDeferredPeer, 0);
   InterlockedExchange(&g_productionFlowSignalMembers, 2);
